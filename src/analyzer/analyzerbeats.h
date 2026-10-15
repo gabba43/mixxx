@@ -29,13 +29,16 @@ class AnalyzerBeats : public Analyzer {
 
   private:
     bool shouldAnalyze(TrackPointer pTrack) const;
-    static QHash<QString, QString> getExtraVersionInfo(
-            const QString& pluginId, bool bPreferencesFastAnalysis);
+    static QHash<QString, QString> getExtraVersionInfo(const QString& pluginId,
+            bool bPreferencesFastAnalysis,
+            const QString& modelSha256);
 
     BeatDetectionSettings m_bpmSettings;
+    const QString m_resourcePath;
     std::unique_ptr<mixxx::AnalyzerBeatsPlugin> m_pPlugin;
     const bool m_enforceBpmDetection;
     QString m_pluginId;
+    QString m_modelSha256;
     bool m_bPreferencesReanalyzeOldBpm;
     bool m_bPreferencesReanalyzeImported;
     bool m_bPreferencesFixedTempo;

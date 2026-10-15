@@ -76,6 +76,9 @@ class AnalyzerBeatsPlugin : public AnalyzerPlugin {
     virtual QVector<mixxx::audio::FramePos> getBeats() const {
         return {};
     }
+    virtual QVector<mixxx::audio::FramePos> getDownbeats() const {
+        return {};
+    }
 };
 
 class AnalyzerKeyPlugin : public AnalyzerPlugin {

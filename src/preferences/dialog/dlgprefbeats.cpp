@@ -1,6 +1,9 @@
 #include "preferences/dialog/dlgprefbeats.h"
 
+#include <QFileDialog>
+
 #include "analyzer/analyzerbeats.h"
+#include "analyzer/plugins/analyzerbeatthis.h"
 #include "defs_urls.h"
 #include "moc_dlgprefbeats.cpp"
 
@@ -20,6 +23,23 @@ DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
         comboBoxBeatPlugin->addItem(info.name(), info.id());
     }
 
+    connect(buttonBeatThisPython, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getOpenFileName(this,
+                tr("Choose Python interpreter"),
+                lineEditBeatThisPython->text());
+        if (!path.isEmpty()) {
+            lineEditBeatThisPython->setText(path);
+        }
+    });
+    connect(buttonBeatThisModel, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getOpenFileName(this,
+                tr("Choose Beat This! model"),
+                lineEditBeatThisModel->text(),
+                tr("Model checkpoints (*.ckpt);;All files (*)"));
+        if (!path.isEmpty()) {
+            lineEditBeatThisModel->setText(path);
+        }
+    });
     slotUpdate();
 
     // TODO (#13466) Keeping the setting hidden for now
@@ -96,6 +116,10 @@ void DlgPrefBeats::slotResetToDefaults() {
     m_bReanalyze = m_bpmSettings.getReanalyzeWhenSettingsChangeDefault();
     m_bReanalyzeImported = m_bpmSettings.getReanalyzeImportedDefault();
     m_stemStrategy = m_bpmSettings.getStemStrategyDefault();
+    lineEditBeatThisPython->setText(m_bpmSettings.getBeatThisPythonDefault());
+    lineEditBeatThisModel->setText(m_bpmSettings.getBeatThisModelDefault());
+    lineEditBeatThisHash->setText(
+            m_bpmSettings.getBeatThisModelSha256Default());
 
     updateGui();
 }
@@ -137,11 +161,17 @@ void DlgPrefBeats::slotUpdate() {
     m_bReanalyzeImported = m_bpmSettings.getReanalyzeImported();
     m_bFastAnalysisEnabled = m_bpmSettings.getFastAnalysis();
     m_stemStrategy = m_bpmSettings.getStemStrategy();
+    lineEditBeatThisPython->setText(m_bpmSettings.getBeatThisPython());
+    lineEditBeatThisModel->setText(m_bpmSettings.getBeatThisModel());
+    lineEditBeatThisHash->setText(m_bpmSettings.getBeatThisModelSha256());
 
     updateGui();
 }
 
 void DlgPrefBeats::updateGui() {
+    groupBoxBeatThis->setVisible(
+            m_selectedAnalyzerId == mixxx::AnalyzerBeatThis::pluginInfo().id());
+    groupBoxBeatThis->setEnabled(m_bAnalyzerEnabled);
     checkBoxFixedTempo->setEnabled(m_bAnalyzerEnabled);
     comboBoxBeatPlugin->setEnabled(m_bAnalyzerEnabled);
     checkBoxAnalyzerEnabled->setChecked(m_bAnalyzerEnabled);
@@ -236,4 +266,8 @@ void DlgPrefBeats::slotApply() {
     m_bpmSettings.setReanalyzeImported(m_bReanalyzeImported);
     m_bpmSettings.setFastAnalysis(m_bFastAnalysisEnabled);
     m_bpmSettings.setStemStrategy(m_stemStrategy);
+    m_bpmSettings.setBeatThisPython(lineEditBeatThisPython->text().trimmed());
+    m_bpmSettings.setBeatThisModel(lineEditBeatThisModel->text().trimmed());
+    m_bpmSettings.setBeatThisModelSha256(
+            lineEditBeatThisHash->text().trimmed().toLower());
 }

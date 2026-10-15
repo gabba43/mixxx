@@ -1,6 +1,7 @@
 #include "waveform/renderers/waveformrenderbeat.h"
 
 #include <QPainter>
+#include <algorithm>
 
 #include "track/track.h"
 #include "util/painterscope.h"
@@ -109,4 +110,21 @@ void WaveformRenderBeat::draw(QPainter* painter, QPaintEvent* /*event*/) {
 
     // Make sure to use constData to prevent detaches!
     painter->drawLines(m_beats.constData(), beatCount);
+    beatPen.setWidthF(std::max(3.0, 3.0 * scaleFactor()));
+    painter->setPen(beatPen);
+    const auto& downbeats = trackBeats->getDownbeats();
+    for (auto downbeat = std::lower_bound(
+                 downbeats.begin(), downbeats.end(), startPosition);
+            downbeat != downbeats.end() && *downbeat <= endPosition;
+            ++downbeat) {
+        double point =
+                m_waveformRenderer->transformSamplePositionInRendererWorld(
+                        downbeat->toEngineSamplePos());
+        point = qRound(point * devicePixelRatio) / devicePixelRatio;
+        if (orientation == Qt::Horizontal) {
+            painter->drawLine(QLineF(point, 0, point, rendererHeight));
+        } else {
+            painter->drawLine(QLineF(0, point, rendererWidth, point));
+        }
+    }
 }

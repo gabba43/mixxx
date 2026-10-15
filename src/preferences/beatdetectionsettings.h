@@ -55,6 +55,20 @@ class BeatDetectionSettings {
     DEFINE_PREFERENCE_HELPERS(FastAnalysis, bool,
                               BPM_CONFIG_KEY, BPM_FAST_ANALYSIS_ENABLED, false);
 
+    DEFINE_PREFERENCE_HELPERS(BeatThisPython,
+            QString,
+            BPM_CONFIG_KEY,
+            "BeatThisPython",
+            QString());
+    DEFINE_PREFERENCE_HELPERS(
+            BeatThisModel, QString, BPM_CONFIG_KEY, "BeatThisModel", QString());
+    DEFINE_PREFERENCE_HELPERS(BeatThisModelSha256,
+            QString,
+            BPM_CONFIG_KEY,
+            "BeatThisModelSha256",
+            QStringLiteral("8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e"
+                           "2febbf8eb8331"));
+
     QString getBeatPluginId() const {
         return m_pConfig->getValue<QString>(ConfigKey(
                 VAMP_CONFIG_KEY, VAMP_ANALYZER_BEAT_PLUGIN_ID));

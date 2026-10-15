@@ -216,8 +216,9 @@ class Beats : private std::enable_shared_from_this<Beats> {
     friend bool operator==(const Beats& lhs, const Beats& rhs) {
         return lhs.m_markers == rhs.m_markers &&
                 lhs.m_lastMarkerPosition == rhs.m_lastMarkerPosition &&
-                lhs.m_lastMarkerBpm == rhs.m_lastMarkerBpm && lhs.m_sampleRate &&
-                rhs.m_sampleRate;
+                lhs.m_lastMarkerBpm == rhs.m_lastMarkerBpm &&
+                lhs.m_sampleRate && rhs.m_sampleRate &&
+                lhs.m_downbeats == rhs.m_downbeats;
     }
 
     friend bool operator!=(const Beats& lhs, const Beats& rhs) {
@@ -372,6 +373,12 @@ class Beats : private std::enable_shared_from_this<Beats> {
     /// The returned Bpm value may be invalid.
     mixxx::Bpm getBpmAroundPosition(audio::FramePos position, int n) const;
 
+    const QVector<audio::FramePos>& getDownbeats() const {
+        return m_downbeats;
+    }
+    bool isDownbeat(audio::FramePos position) const;
+    BeatsPointer withDownbeats(const QVector<audio::FramePos>& positions) const;
+
     audio::SampleRate getSampleRate() const {
         return m_sampleRate;
     }
@@ -442,6 +449,7 @@ class Beats : private std::enable_shared_from_this<Beats> {
     mixxx::audio::FramePos m_lastMarkerPosition;
     mixxx::Bpm m_lastMarkerBpm;
     mixxx::audio::SampleRate m_sampleRate;
+    QVector<audio::FramePos> m_downbeats;
 
     // The sub-version of this beatgrid.
     const QString m_subVersion;

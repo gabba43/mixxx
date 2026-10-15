@@ -23,7 +23,7 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
                 true);
     }
 
-    AnalyzerQueenMaryBeats();
+    explicit AnalyzerQueenMaryBeats(bool fixedTempo = true);
     ~AnalyzerQueenMaryBeats() override;
 
     AnalyzerPluginInfo info() const override {
@@ -43,12 +43,16 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     }
 
   private:
+    const bool m_fixedTempo;
     std::unique_ptr<DetectionFunction> m_pDetectionFunction;
+    std::unique_ptr<DetectionFunction> m_pPulseDetectionFunction;
     DownmixAndOverlapHelper m_helper;
     mixxx::audio::SampleRate m_sampleRate;
     int m_windowSize;
     int m_stepSizeFrames;
     std::vector<double> m_detectionResults;
+    std::vector<double> m_pulseDetectionResults;
+    std::vector<double> m_lowBandWindow;
     QVector<mixxx::audio::FramePos> m_resultBeats;
 };
 

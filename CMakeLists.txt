@@ -1209,9 +1209,11 @@ add_library(
   src/analyzer/analyzerthread.cpp
   src/analyzer/analyzertrack.cpp
   src/analyzer/analyzerwaveform.cpp
+  src/analyzer/plugins/analyzerbeatthis.cpp
   src/analyzer/plugins/analyzerqueenmarybeats.cpp
   src/analyzer/plugins/analyzerqueenmarykey.cpp
   src/analyzer/plugins/analyzersoundtouchbeats.cpp
+  src/analyzer/plugins/beattrackingrefiner.cpp
   src/analyzer/plugins/buffering_utils.cpp
   src/analyzer/trackanalysisscheduler.cpp
   src/audio/frame.cpp
@@ -2640,6 +2642,11 @@ if(APPLE OR WIN32)
   )
 endif()
 
+install(
+  FILES "${CMAKE_CURRENT_SOURCE_DIR}/res/analysis/beat_this_worker.py"
+  DESTINATION "${MIXXX_INSTALL_DATADIR}/analysis"
+)
+
 # Keyboard mapping(s)
 install(
   DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/res/keyboard"
@@ -2925,9 +2932,11 @@ if(BUILD_TESTING)
   set(
     src-mixxx-test
     src/test/analyserwaveformtest.cpp
+    src/test/analyzerbeats_test.cpp
     src/test/analyzersilence_test.cpp
     src/test/audiotaperpot_test.cpp
     src/test/autodjprocessor_test.cpp
+    src/test/beatthis_test.cpp
     src/test/beatgridtest.cpp
     src/test/beatmaptest.cpp
     src/test/beatstest.cpp

@@ -136,7 +136,7 @@ bool WaveformRenderBeat::preprocessInner() {
         xBeatPoint = qRound(xBeatPoint * devicePixelRatio) / devicePixelRatio;
 
         const float x1 = static_cast<float>(xBeatPoint);
-        const float x2 = x1 + 1.f;
+        const float x2 = x1 + (trackBeats->isDownbeat(*it) ? 3.f : 1.f);
 
         if (m_isSlipRenderer && splitStemTracks) {
             for (int stemIdx = 0; stemIdx < mixxx::kMaxSupportedStems; ++stemIdx) {

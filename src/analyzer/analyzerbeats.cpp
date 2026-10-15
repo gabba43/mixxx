@@ -7,6 +7,7 @@
 
 #include "analyzer/analyzertrack.h"
 #include "analyzer/constants.h"
+#include "analyzer/plugins/analyzerbeatthis.h"
 #include "analyzer/plugins/analyzerqueenmarybeats.h"
 #include "analyzer/plugins/analyzersoundtouchbeats.h"
 #include "library/rekordbox/rekordboxconstants.h"
@@ -19,6 +20,7 @@ QList<mixxx::AnalyzerPluginInfo> AnalyzerBeats::availablePlugins() {
     // First one below is the default
     plugins.append(mixxx::AnalyzerQueenMaryBeats::pluginInfo());
     plugins.append(mixxx::AnalyzerSoundTouchBeats::pluginInfo());
+    plugins.append(mixxx::AnalyzerBeatThis::pluginInfo());
     return plugins;
 }
 
@@ -29,8 +31,10 @@ mixxx::AnalyzerPluginInfo AnalyzerBeats::defaultPlugin() {
     return plugins.at(0);
 }
 
-AnalyzerBeats::AnalyzerBeats(UserSettingsPointer pConfig, bool enforceBpmDetection)
+AnalyzerBeats::AnalyzerBeats(
+        UserSettingsPointer pConfig, bool enforceBpmDetection)
         : m_bpmSettings(pConfig),
+          m_resourcePath(pConfig->getResourcePath()),
           m_enforceBpmDetection(enforceBpmDetection),
           m_bPreferencesReanalyzeOldBpm(false),
           m_bPreferencesReanalyzeImported(false),
@@ -66,6 +70,7 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
     m_bPreferencesReanalyzeOldBpm = m_bpmSettings.getReanalyzeWhenSettingsChange();
     m_bPreferencesReanalyzeImported = m_bpmSettings.getReanalyzeImported();
     m_bPreferencesFastAnalysis = m_bpmSettings.getFastAnalysis();
+    m_modelSha256 = m_bpmSettings.getBeatThisModelSha256().toLower();
 
     const auto plugins = availablePlugins();
     if (!plugins.isEmpty()) {
@@ -104,8 +109,17 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
     DEBUG_ASSERT(!m_pPlugin);
     if (bShouldAnalyze) {
         if (m_pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
-            m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>();
-        } else if (m_pluginId == mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
+            m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>(
+                    m_bPreferencesFixedTempo);
+        } else if (m_pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
+            m_pPlugin = std::make_unique<mixxx::AnalyzerBeatThis>(
+                    mixxx::AnalyzerBeatThis::Options{
+                            m_bpmSettings.getBeatThisPython(),
+                            m_resourcePath + "analysis/beat_this_worker.py",
+                            m_bpmSettings.getBeatThisModel(),
+                            m_modelSha256});
+        } else if (m_pluginId ==
+                mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
             m_pPlugin = std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
         } else {
             // This must not happen, because we have already verified above
@@ -172,9 +186,9 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
     }
 
     QString version = pBeats->getVersion();
-    QHash<QString, QString> extraVersionInfo = getExtraVersionInfo(
-            pluginID,
-            m_bPreferencesFastAnalysis);
+    QHash<QString, QString> extraVersionInfo = getExtraVersionInfo(pluginID,
+            m_bPreferencesFastAnalysis,
+            m_modelSha256);
     QString newVersion = BeatFactory::getPreferredVersion(
             m_bPreferencesFixedTempo);
     QString newSubVersion = BeatFactory::getPreferredSubVersion(
@@ -201,7 +215,13 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
         return false;
     }
 
-    SINT numFrames = count / m_channelCount;
+    if (m_currentFrame >= m_maxFramesToProcess) {
+        return true;
+    }
+    const SINT numFrames = std::min(
+            count / m_channelCount, m_maxFramesToProcess - m_currentFrame);
+    count = numFrames * m_channelCount;
+    m_currentFrame += numFrames;
     const CSAMPLE* pBeatInput = pIn;
     CSAMPLE* pDrumChannel = nullptr;
 
@@ -231,11 +251,6 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
         return false;
     }
 
-    m_currentFrame += numFrames;
-    if (m_currentFrame > m_maxFramesToProcess) {
-        return true; // silently ignore all remaining samples
-    }
-
     bool ret = m_pPlugin->processSamples(pBeatInput, count);
     if (pDrumChannel) {
         SampleUtil::free(pDrumChannel);
@@ -260,13 +275,18 @@ void AnalyzerBeats::storeResults(TrackPointer pTrack) {
     mixxx::BeatsPointer pBeats;
     if (m_pPlugin->supportsBeatTracking()) {
         QVector<mixxx::audio::FramePos> beats = m_pPlugin->getBeats();
-        QHash<QString, QString> extraVersionInfo = getExtraVersionInfo(
-                m_pluginId, m_bPreferencesFastAnalysis);
+        QHash<QString, QString> extraVersionInfo =
+                getExtraVersionInfo(m_pluginId,
+                        m_bPreferencesFastAnalysis,
+                        m_modelSha256);
         pBeats = BeatFactory::makePreferredBeats(
                 beats,
                 extraVersionInfo,
                 m_bPreferencesFixedTempo,
                 m_sampleRate);
+        if (pBeats && !m_pPlugin->getDownbeats().isEmpty()) {
+            pBeats = pBeats->withDownbeats(m_pPlugin->getDownbeats());
+        }
         qDebug() << "AnalyzerBeats plugin detected" << beats.size()
                  << "beats. Predominant BPM:"
                  << (pBeats ? pBeats->getBpmInRange(
@@ -286,9 +306,18 @@ void AnalyzerBeats::storeResults(TrackPointer pTrack) {
 
 // static
 QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
-        const QString& pluginId, bool bPreferencesFastAnalysis) {
+        const QString& pluginId,
+        bool bPreferencesFastAnalysis,
+        const QString& modelSha256) {
     QHash<QString, QString> extraVersionInfo;
     extraVersionInfo["vamp_plugin_id"] = pluginId;
+    if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
+        extraVersionInfo["beat_tracker_version"] = "2";
+    }
+    if (pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
+        extraVersionInfo["model_sha256"] = modelSha256.toLower();
+        extraVersionInfo["beat_this_backend"] = "1";
+    }
     if (bPreferencesFastAnalysis) {
         extraVersionInfo["fast_analysis"] = "1";
     }

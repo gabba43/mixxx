@@ -38,6 +38,31 @@ automatically shows a beat-grid for them, and allows you to synchronize tracks u
      </property>
     </spacer>
    </item>
+   <item row="4" column="0">
+    <widget class="QGroupBox" name="groupBoxBeatThis">
+     <property name="title"><string>Local Beat This! installation</string></property>
+     <layout class="QFormLayout" name="beatThisForm">
+      <item row="0" column="0" colspan="2">
+       <widget class="QLabel" name="labelBeatThisInfo">
+        <property name="text"><string>Choose a Python environment with Beat This! and a downloaded model. Analysis stays on this computer.</string></property>
+        <property name="wordWrap"><bool>true</bool></property>
+       </widget>
+      </item>
+      <item row="1" column="0"><widget class="QLabel" name="labelBeatThisPython"><property name="text"><string>Python interpreter</string></property><property name="buddy"><cstring>lineEditBeatThisPython</cstring></property></widget></item>
+      <item row="1" column="1"><layout class="QHBoxLayout" name="beatThisPythonLayout">
+       <item><widget class="QLineEdit" name="lineEditBeatThisPython"/></item>
+       <item><widget class="QPushButton" name="buttonBeatThisPython"><property name="text"><string>Browse…</string></property></widget></item>
+      </layout></item>
+      <item row="2" column="0"><widget class="QLabel" name="labelBeatThisModel"><property name="text"><string>Model checkpoint</string></property><property name="buddy"><cstring>lineEditBeatThisModel</cstring></property></widget></item>
+      <item row="2" column="1"><layout class="QHBoxLayout" name="beatThisModelLayout">
+       <item><widget class="QLineEdit" name="lineEditBeatThisModel"/></item>
+       <item><widget class="QPushButton" name="buttonBeatThisModel"><property name="text"><string>Browse…</string></property></widget></item>
+      </layout></item>
+      <item row="3" column="0"><widget class="QLabel" name="labelBeatThisHash"><property name="text"><string>Model SHA-256</string></property><property name="buddy"><cstring>lineEditBeatThisHash</cstring></property></widget></item>
+      <item row="3" column="1"><widget class="QLineEdit" name="lineEditBeatThisHash"><property name="toolTip"><string>The expected SHA-256 fingerprint of the model. The default matches the official final0 checkpoint.</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
    <item row="3" column="0">
     <widget class="QGroupBox" name="groupBox_2">
      <property name="title">
