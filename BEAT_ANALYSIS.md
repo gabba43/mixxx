@@ -28,6 +28,12 @@ engineering thresholds, not probabilities or calibrated confidence values.
 The original result is retained when evidence is insufficient or ambiguous.
 Variable-tempo analysis bypasses this constant-tempo correction entirely.
 
+The refiner also compares the supplied grid phase with the best supported
+phase at the same tempo. It can correct a half-beat displacement when the
+same conservative support and improvement thresholds are met. Queen Mary
+does not classify bar downbeats. In Auto mode its refinement is applied
+only after the unrefined result passes the constant-grid fit check below.
+
 The Queen Mary analysis subversion changes so the existing reanalysis
 preference can distinguish old and new results. BPM locks and the user's
 choice not to reanalyze existing grids remain effective. Existing library
@@ -48,8 +54,8 @@ external process on the analysis worker, using CPU PyTorch and `dbn=False`.
 Audio is downmixed to mono and streamed into a temporary float32 file;
 no audio is uploaded. Mixxx does not download models or install Python
 packages during analysis. The process supports cancellation and has a
-10-minute limit per track. A missing runtime, invalid checkpoint, failed
-process or invalid result leaves the track's previous grid intact.
+10-minute limit per track. The analyzer commits results only after successful
+validation; a failed run leaves any grid still present on the track untouched.
 
 The worker requires Beat This! 1.1.0. A tested Linux CPU setup is:
 
@@ -84,11 +90,94 @@ explicit downbeat markings, not automatic bar-level synchronization or meter
 editing. Old Mixxx versions can read the beat data but discard the new
 fields if they save it again.
 
-The existing fixed-tempo and fast-analysis choices still apply. Disable
-fast analysis to inspect the complete track. For changing-tempo music,
-disable the fixed-tempo assumption as well. Model identity and backend
-version are recorded in the analysis subversion so a changed checkpoint can
-trigger reanalysis when that preference is enabled.
+## Auto, Constant and Variable
+
+Preferences > Beat Detection now offers three grid modes. The track analysis
+menu also offers overrides for individual tracks without changing the global
+preference.
+
+- **Auto** tests a constant candidate against detected beats across the whole
+  track. It keeps the constant grid only when at least 90% of the beats fit
+  within 40 ms or 10% of a beat, whichever is smaller. Two consecutive
+  16-beat blocks with at least four outliers each also reject the constant
+  candidate. At least 32 predictions are required to accept a constant grid.
+  Otherwise it uses the variable result.
+- **Constant** forces the existing single-tempo grid construction.
+- **Variable** preserves Beat This! beat positions directly, including tempo
+  changes. It bypasses the Queen Mary-oriented region smoothing previously
+  applied to every provider. Downbeats remain attached to those positions.
+
+Dense variable beat maps also need a stable representative BPM. A histogram
+of single intervals can report 130.43 BPM for a quantized 133.15 BPM pulse,
+or 136.36 BPM for 138 BPM. For maps with at least 16 tempo markers and fewer
+than four beats per marker on average, the BPM summary now uses 16-beat
+neighborhood estimates. Whole-BPM buckets collect small variations, and a
+time-weighted mean within the dominant bucket supplies the reported value
+to two decimal places. This changes neither beat timing nor the local
+beat-position-based tempo. Sparse maps retain their existing calculation.
+
+Auto is the default for a fresh configuration. Existing constant/variable
+preferences are migrated to the corresponding explicit mode. Auto is a
+conservative grid-fit check, not a measurement of the model's confidence or
+a proof of the intended musical tempo. Ambiguous predictions can cause a
+physically constant song to use a variable grid.
+
+Fast analysis is available only in Constant mode. Auto and Variable analyze
+the full track even if an old configuration still has fast analysis enabled.
+Model identity, backend version and Auto mode are recorded in the analysis
+subversion, so changing these can trigger reanalysis when that preference is
+enabled. BPM locks and the existing reanalysis preference remain effective.
+
+Applying beat-detection preferences now saves them to disk immediately.
+Refreshing the dialog blocks widget change signals so programmatic updates
+cannot be mistaken for user selections. A reproduced display bug also showed
+Queen Mary instead of the saved provider while BPM detection was disabled:
+the disabled dialog returned before populating its selections. It now shows
+the saved provider and grid mode in that state too. This does not establish
+that every reported intermittent reset had that cause. Opening an older Mixxx
+build with the same profile can still overwrite settings it does not support.
+
+## Analysis progress and supplied logs
+
+Model inference still runs after audio decoding. Previously decoding took
+the progress display to 95%, then the entire Python/model job ran without
+updates. Beat This! jobs now reserve 0–50% for decoding and 50–95% for model
+preparation and inference; final result storage completes the job. The worker
+reports each completed model window through a separate stderr protocol.
+This is stage progress, not an estimate of remaining wall-clock time. The
+official preprocessing, inference and postprocessing remain in use.
+
+Both supplied tracks were decoded and evaluated in full with `final0`:
+
+| Track | Audio length | Beat predictions | Initial worker time |
+| --- | ---: | ---: | ---: |
+| HMC – Body Mechanics | 560.07 s | 1,243 | 28.16 s |
+| Parallel 9 – Gnosis | 465.17 s | 1,062 | 27.14 s |
+
+The instrumented worker returned exactly the same beat and downbeat arrays
+as the previous worker for both files. It emitted 25 and 22 progress updates,
+respectively. These timings include Python startup and model loading on this
+CPU environment; they are not a general speed guarantee.
+
+The uploaded-track regression verifies every saved and restored variable
+beat against the model within one audio sample at 44.1 kHz. The previous
+variable-grid smoothing displaced predictions by up to 24.44 ms for HMC and
+38.38 ms for Gnosis. Auto selects Variable for both files; their new
+representative variable-grid BPM values are 133.04 and 137.94, respectively.
+These are summaries of changing/local predictions, not annotated ground truth.
+
+Queen Mary's measured median distance to the Beat This! predictions remains
+59.80 ms for HMC and 189.77 ms for Gnosis with the conservative refiner.
+The added phase correction does not resolve these original-track cases.
+It passes the synthetic half-beat-offset regression; that is not evidence
+of correct bar/downbeat classification on these recordings.
+
+The supplied logs contain 124 expected M4A/MP4 container-alias warnings and
+ten empty-temporary-filename warnings. The valid M4A-to-MP4 alias no longer
+produces a warning, and Beat This! initialization avoids removing an unnamed
+temporary file. ICC profile, OpenGL teardown, audio-device and database
+warnings have different sources and are not diagnosed as neural inference
+failures by this work.
 
 ## Verification and limits
 
@@ -111,8 +200,18 @@ Enable it by setting `MIXXX_TEST_BEAT_THIS_PYTHON` and
 Without these variables this test is explicitly skipped. Python protocol
 checks run with `python3 -m unittest tools/test_beat_this_worker.py`.
 
-Final validation in this environment: the Debug build succeeded; all 1,289
-active CTest cases passed, including the real-model integration test. The
+The follow-up adds real-model validation of a 76-second track changing from
+120 to 144 BPM, Auto/Constant/Variable selection, legacy-setting migration,
+immediate preference persistence, programmatic dialog refresh, progress
+callbacks, and quantized-BPM summaries at 44.1 and 48 kHz.
+The optional uploaded-track case uses `MIXXX_TEST_BEAT_THIS_TRACK_DIRECTORY`
+with local `hmc.f32`, `gnosis.f32` mono float32 files at 44.1 kHz and their
+`*-baseline.json` model results. Original music files are not included in
+the repository.
+
+Final validation in this environment: the Debug build succeeded; all 1,301
+active CTest cases passed, including both real-model integration tests and
+the supplied-track regression. The
 38 existing disabled cases remained disabled. Both Python checks, Black,
 Flake8 and formatting checks for the new C++ integration files passed.
 Mixxx also initialized its database, loaded the LateNight skin, opened
@@ -134,6 +233,9 @@ run, including Python startup and model loading, took 6.66 seconds with
 approximately 510 MiB peak resident memory while a build was also running.
 This single measurement is not a throughput benchmark. Each track currently
 starts a new Python process and loads the model again.
+
+This follow-up is developed on `feat/beat-this-variable-tempo`. The previous
+implementation remains on `feat/beat-this-analysis` at `a6db4edf42`.
 
 ## Research consulted
 

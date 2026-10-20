@@ -1,5 +1,6 @@
 #include "analyzer/analyzerthread.h"
 
+#include <algorithm>
 #include <mutex>
 
 #include "analyzer/analyzerbeats.h"
@@ -158,7 +159,17 @@ void AnalyzerThread::doRun() {
         }
 
         if (processTrack) {
-            const auto analysisResult = analyzeAudioSource(audioSource);
+            const bool hasFinalizationProgress =
+                    std::any_of(m_analyzers.begin(),
+                            m_analyzers.end(),
+                            [](const auto& analyzer) {
+                                return analyzer.hasFinalizationProgress();
+                            });
+            const auto decodingProgressLimit = hasFinalizationProgress
+                    ? kAnalyzerProgressHalf
+                    : kAnalyzerProgressFinalizing;
+            const auto analysisResult =
+                    analyzeAudioSource(audioSource, decodingProgressLimit);
             DEBUG_ASSERT(analysisResult != AnalysisResult::Pending);
             if (analysisResult == AnalysisResult::Finished) {
                 // The analysis has been finished, and is either complete without
@@ -167,10 +178,17 @@ void AnalyzerThread::doRun() {
                 // session. A partial analysis would otherwise be repeated again
                 // and again, because it is very unlikely that the error vanishes
                 // suddenly.
-                emitBusyProgress(kAnalyzerProgressFinalizing);
+                emitBusyProgress(decodingProgressLimit);
                 // This takes around 3 sec on a Atom Netbook
                 for (auto&& analyzer : m_analyzers) {
-                    analyzer.finish(*m_currentTrack);
+                    analyzer.finish(*m_currentTrack,
+                            [this, decodingProgressLimit](
+                                    AnalyzerProgress progress) {
+                                emitBusyProgress(decodingProgressLimit +
+                                        std::clamp(progress, 0.0, 1.0) *
+                                                (kAnalyzerProgressFinalizing -
+                                                        decodingProgressLimit));
+                            });
                 }
                 emitDoneProgress(kAnalyzerProgressDone);
             } else {
@@ -225,7 +243,8 @@ WorkerThread::TryFetchWorkItemsResult AnalyzerThread::tryFetchWorkItems() {
 }
 
 AnalyzerThread::AnalysisResult AnalyzerThread::analyzeAudioSource(
-        const mixxx::AudioSourcePointer& audioSource) {
+        const mixxx::AudioSourcePointer& audioSource,
+        AnalyzerProgress decodingProgressLimit) {
     DEBUG_ASSERT(m_currentTrack.has_value());
 
     DEBUG_ASSERT(
@@ -315,10 +334,9 @@ AnalyzerThread::AnalysisResult AnalyzerThread::analyzeAudioSource(
                     static_cast<double>(audioSource->frameLength() - remainingFrameRange.length()) /
                     audioSource->frameLength();
             // math_min is required to compensate rounding errors
-            const AnalyzerProgress progress =
-                    math_min(kAnalyzerProgressFinalizing,
-                            frameProgress *
-                                    (kAnalyzerProgressFinalizing - kAnalyzerProgressNone));
+            const AnalyzerProgress progress = math_min(decodingProgressLimit,
+                    frameProgress *
+                            (decodingProgressLimit - kAnalyzerProgressNone));
             DEBUG_ASSERT(progress > kAnalyzerProgressNone);
             emitBusyProgress(progress);
         } else {

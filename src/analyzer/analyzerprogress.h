@@ -1,9 +1,12 @@
 #pragma once
 
+#include <functional>
+
 #include "util/math.h"
 
 
 typedef double AnalyzerProgress;
+using AnalyzerProgressCallback = std::function<void(AnalyzerProgress)>;
 
 constexpr AnalyzerProgress kAnalyzerProgressUnknown    = -1.0;
 constexpr AnalyzerProgress kAnalyzerProgressNone       =  0.0;  //   0.0 %

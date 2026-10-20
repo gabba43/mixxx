@@ -132,7 +132,8 @@ class AnalyzerThread : public WorkerThread {
         Cancelled,
     };
     AnalysisResult analyzeAudioSource(
-            const mixxx::AudioSourcePointer& audioSource);
+            const mixxx::AudioSourcePointer& audioSource,
+            AnalyzerProgress decodingProgressLimit);
 
     // Blocks the worker thread until a next track becomes available
     TrackPointer receiveNextTrack();

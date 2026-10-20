@@ -148,6 +148,27 @@ TEST(BeatTrackingRefinerTest, HarmonicHypothesesRequireOnsetEvidence) {
     }
 }
 
+TEST(BeatTrackingRefinerTest,
+        StrongOnsetsCorrectHalfBeatPhaseWithoutChangingTempo) {
+    constexpr int rate = 44100;
+    constexpr int hop = 512;
+    constexpr double period = 0.5 * rate;
+    std::vector<double> onsets(24 * rate / hop);
+    QVector<mixxx::audio::FramePos> wrongPhase;
+    for (double position = 0.2 * rate; position < 24 * rate;
+            position += period) {
+        onsets[static_cast<size_t>(std::round(position / hop - 0.5))] = 1;
+        wrongPhase.push_back(mixxx::audio::FramePos(position + period / 2));
+    }
+    const auto corrected = mixxx::refineBeatTrackingTempo(
+            wrongPhase, onsets, mixxx::audio::SampleRate(rate), hop);
+    ASSERT_GT(corrected.size(), 20);
+    for (const auto beat : corrected) {
+        EXPECT_NEAR(0, std::remainder(beat.value() - 0.2 * rate, period), hop);
+    }
+    EXPECT_NEAR(period, corrected[2] - corrected[1], 1);
+}
+
 TEST(BeatTrackingRefinerTest, UncertainOrChangingTempoIsPreserved) {
     constexpr int rate = 44100;
     constexpr int hop = 512;
@@ -234,6 +255,7 @@ TEST_F(AnalyzerBeatProtectionTest, LockedAndManualGridsArePreserved) {
 }
 
 TEST_F(AnalyzerBeatProtectionTest, CorrectedTempoIsStoredWithAnalysisVersion) {
+    BeatDetectionSettings(config()).setTempoMode(mixxx::BeatGridMode::Constant);
     auto track = Track::newTemporary();
     track->setAudioProperties(mixxx::audio::ChannelCount::stereo(),
             mixxx::audio::SampleRate(44100),
@@ -254,7 +276,7 @@ TEST_F(AnalyzerBeatProtectionTest, CorrectedTempoIsStoredWithAnalysisVersion) {
     ASSERT_TRUE(track->getBeats());
     EXPECT_NEAR(174, track->getBpm(), 0.1);
     EXPECT_TRUE(track->getBeats()->getSubVersion().contains(
-            "beat_tracker_version=2"));
+            "beat_tracker_version=3"));
     EXPECT_FALSE(analyzer.initialize(AnalyzerTrack(track),
             track->getSampleRate(),
             mixxx::audio::ChannelCount::stereo(),
@@ -263,6 +285,7 @@ TEST_F(AnalyzerBeatProtectionTest, CorrectedTempoIsStoredWithAnalysisVersion) {
 
 TEST_F(AnalyzerBeatProtectionTest, FastAnalysisProcessesPartialFinalBlock) {
     BeatDetectionSettings settings(config());
+    settings.setTempoMode(mixxx::BeatGridMode::Constant);
     settings.setFastAnalysis(true);
     auto track = Track::newTemporary();
     track->setAudioProperties(mixxx::audio::ChannelCount::stereo(),

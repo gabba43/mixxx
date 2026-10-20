@@ -1,7 +1,10 @@
-#include <QtDebug>
-#include <QStringList>
-
 #include "track/beatfactory.h"
+
+#include <QStringList>
+#include <QtDebug>
+#include <algorithm>
+#include <cmath>
+
 #include "track/beatutils.h"
 
 namespace {
@@ -52,8 +55,16 @@ mixxx::BeatsPointer BeatFactory::makePreferredBeats(
         const QVector<mixxx::audio::FramePos>& beats,
         const QHash<QString, QString>& extraVersionInfo,
         bool fixedTempo,
-        mixxx::audio::SampleRate sampleRate) {
+        mixxx::audio::SampleRate sampleRate,
+        bool preserveBeatPositions) {
     DEBUG_ASSERT(sampleRate.isValid());
+    if (preserveBeatPositions && !fixedTempo) {
+        if (beats.size() < 2) {
+            return nullptr;
+        }
+        return mixxx::Beats::fromBeatPositions(
+                sampleRate, beats, getPreferredSubVersion(extraVersionInfo));
+    }
 #ifdef DEBUG_PRINT_BEATS
     for (mixxx::audio::FramePos beat : beats) {
         qDebug().noquote() << QString::number(beat.value(), 'g', 8);
@@ -79,7 +90,7 @@ mixxx::BeatsPointer BeatFactory::makePreferredBeats(
         mixxx::audio::FramePos firstBeat = mixxx::audio::kStartFramePos;
         const mixxx::Bpm constBPM = BeatUtils::makeConstBpm(
                 constantRegions, sampleRate, &firstBeat);
-        if (firstBeat.isValid()) {
+        if (firstBeat.isValid() && constBPM.isValid()) {
             firstBeat = BeatUtils::adjustPhase(firstBeat, constBPM, sampleRate, beats);
             auto pGrid = mixxx::Beats::fromConstTempo(
                     sampleRate, firstBeat.toNearestFrameBoundary(), constBPM, subVersion);
@@ -95,4 +106,53 @@ mixxx::BeatsPointer BeatFactory::makePreferredBeats(
         qDebug() << "ERROR: Could not determine what type of beatgrid to create.";
     }
     return nullptr;
+}
+
+mixxx::BeatsPointer BeatFactory::makePreferredBeats(
+        const QVector<mixxx::audio::FramePos>& beats,
+        const QHash<QString, QString>& extraVersionInfo,
+        mixxx::BeatGridMode mode,
+        mixxx::audio::SampleRate sampleRate,
+        bool preserveBeatPositions) {
+    if (mode != mixxx::BeatGridMode::Auto) {
+        return makePreferredBeats(beats,
+                extraVersionInfo,
+                mode == mixxx::BeatGridMode::Constant,
+                sampleRate,
+                preserveBeatPositions);
+    }
+    if (beats.size() >= 32) {
+        const auto constant =
+                makePreferredBeats(beats, extraVersionInfo, true, sampleRate);
+        if (constant) {
+            const double period = 60.0 * sampleRate /
+                    constant->getBpmAroundPosition(beats.front(), 1).value();
+            const double tolerance = std::min(0.04 * sampleRate, period * 0.1);
+            int outliers = 0;
+            int blockOutliers = 0;
+            int consecutiveBadBlocks = 0;
+            bool sustainedDeviation = false;
+            for (int i = 0; i < beats.size(); ++i) {
+                if (std::abs(constant->findClosestBeat(beats[i]) - beats[i]) >
+                        tolerance) {
+                    ++outliers;
+                    ++blockOutliers;
+                }
+                if ((i + 1) % 16 == 0) {
+                    consecutiveBadBlocks =
+                            blockOutliers >= 4 ? consecutiveBadBlocks + 1 : 0;
+                    sustainedDeviation |= consecutiveBadBlocks >= 2;
+                    blockOutliers = 0;
+                }
+            }
+            if (outliers <= 0.1 * beats.size() && !sustainedDeviation) {
+                qDebug() << "Auto beat grid: constant;" << outliers
+                         << "outliers of" << beats.size();
+                return constant;
+            }
+        }
+    }
+    qDebug() << "Auto beat grid: variable;" << beats.size() << "detected beats";
+    return makePreferredBeats(
+            beats, extraVersionInfo, false, sampleRate, preserveBeatPositions);
 }

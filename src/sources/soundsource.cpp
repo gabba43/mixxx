@@ -87,7 +87,10 @@ QString SoundSource::getTypeFromFile(const QFileInfo& fileInfo) {
         qWarning() << "No file type registered for MIME type" << mimeType;
         return fileSuffix;
     }
-    if (fileType != fileSuffix && !mimeType.suffixes().contains(fileSuffix)) {
+    const bool isMpeg4AudioAlias = fileSuffix == QLatin1String("m4a") &&
+            fileType == QLatin1String("mp4");
+    if (fileType != fileSuffix && !mimeType.suffixes().contains(fileSuffix) &&
+            !isMpeg4AudioAlias) {
         qWarning()
                 << "Using type" << fileType
                 << "instead of" << fileSuffix

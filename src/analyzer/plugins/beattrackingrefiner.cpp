@@ -149,8 +149,9 @@ QVector<audio::FramePos> refineBeatTrackingTempo(
         peak.strength = std::sqrt(peak.strength / maximum);
     }
 
-    const auto original = bestPhase(peaks, period, tolerance);
-    auto best = original;
+    const auto original =
+            evaluate(peaks, period, grid->firstBeat().value(), tolerance);
+    auto best = bestPhase(peaks, period, tolerance);
     double runnerUpScore = 0;
     for (const double multiplier : {0.5, 2. / 3., 1.5, 2.}) {
         const double candidateBpm = bpm.value() * multiplier;
@@ -168,9 +169,14 @@ QVector<audio::FramePos> refineBeatTrackingTempo(
             runnerUpScore = std::max(runnerUpScore, candidate.score);
         }
     }
-    if (best.period == original.period || best.score < 0.85 ||
+    if (best.precision < 0.8 || best.score < 0.85 ||
             best.score < original.score + 0.08 ||
             best.score < runnerUpScore + 0.04) {
+        return beats;
+    }
+    if (best.period == original.period &&
+            std::abs(std::remainder(best.phase - grid->firstBeat().value(),
+                    period)) <= tolerance) {
         return beats;
     }
 

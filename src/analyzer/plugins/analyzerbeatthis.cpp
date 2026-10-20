@@ -29,7 +29,9 @@ bool AnalyzerBeatThis::initialize(audio::SampleRate sampleRate) {
     m_frames = 0;
     m_failed = false;
     m_initialized = false;
-    m_audio.remove();
+    if (!m_audio.fileName().isEmpty()) {
+        m_audio.remove();
+    }
     m_sampleRate = sampleRate;
     const QString python = QStandardPaths::findExecutable(m_options.python);
     if (!sampleRate.isValid() || m_options.python.isEmpty() ||
@@ -73,6 +75,11 @@ bool AnalyzerBeatThis::processSamples(const CSAMPLE* input, SINT count) {
 }
 
 bool AnalyzerBeatThis::finalize() {
+    return finalizeWithProgress({});
+}
+
+bool AnalyzerBeatThis::finalizeWithProgress(
+        const AnalyzerProgressCallback& progress) {
     if (!m_initialized || m_failed || m_frames == 0 || !m_audio.flush()) {
         return false;
     }
@@ -94,11 +101,41 @@ bool AnalyzerBeatThis::finalize() {
     const bool started = process.waitForStarted(10000);
     QElapsedTimer timer;
     timer.start();
+    QByteArray pendingError;
+    QByteArray errorOutput;
+    double lastProgress = 0;
+    const auto consumeError = [&] {
+        pendingError += process.readAllStandardError();
+        int end = 0;
+        while ((end = pendingError.indexOf('\n')) >= 0) {
+            const auto line = pendingError.left(end).trimmed();
+            pendingError.remove(0, end + 1);
+            constexpr char kProgressPrefix[] = "MIXXX_BEAT_THIS_PROGRESS ";
+            if (line.startsWith(kProgressPrefix)) {
+                bool valid = false;
+                const auto value =
+                        line.mid(sizeof(kProgressPrefix) - 1).toDouble(&valid);
+                if (valid && std::isfinite(value) && value >= lastProgress &&
+                        value <= 1) {
+                    lastProgress = value;
+                    if (progress) {
+                        progress(value);
+                    }
+                }
+            } else {
+                errorOutput.append(line).append('\n');
+                errorOutput = errorOutput.right(4096);
+            }
+        }
+        pendingError = pendingError.right(4096);
+    };
     auto* worker = qobject_cast<WorkerThread*>(QThread::currentThread());
     while (started && process.state() != QProcess::NotRunning &&
             timer.elapsed() < 600000 && !(worker && worker->isStopping())) {
         process.waitForFinished(200);
+        consumeError();
     }
+    consumeError();
     if (!started || process.state() != QProcess::NotRunning) {
         process.kill();
         process.waitForFinished(5000);
@@ -110,17 +147,25 @@ bool AnalyzerBeatThis::finalize() {
     m_audio.remove();
     if (process.exitStatus() != QProcess::NormalExit ||
             process.exitCode() != 0) {
+        errorOutput.append(pendingError);
         qWarning().noquote()
-                << "Beat This!:"
-                << QString::fromUtf8(process.readAllStandardError()).left(4096);
+                << "Beat This!:" << QString::fromUtf8(errorOutput.right(4096));
         return false;
     }
-    return parseResults(process.readAllStandardOutput(),
+    const bool parsed = parseResults(process.readAllStandardOutput(),
             m_options.sha256,
             m_sampleRate,
             m_frames,
             &m_beats,
             &m_downbeats);
+    if (parsed) {
+        qDebug() << "Beat This! analyzed" << m_frames / m_sampleRate.value()
+                 << "seconds in" << timer.elapsed() << "ms;" << m_beats.size()
+                 << "beats," << m_downbeats.size() << "downbeats";
+    } else {
+        qWarning() << "Beat This! returned invalid beat results";
+    }
+    return parsed;
 }
 
 bool AnalyzerBeatThis::parseResults(const QByteArray& json,

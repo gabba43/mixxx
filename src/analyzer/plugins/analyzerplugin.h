@@ -2,6 +2,7 @@
 
 #include <QString>
 
+#include "analyzer/analyzerprogress.h"
 #include "audio/frame.h"
 #include "track/beats.h"
 #include "track/bpm.h"
@@ -68,6 +69,12 @@ class AnalyzerPlugin {
 class AnalyzerBeatsPlugin : public AnalyzerPlugin {
   public:
     ~AnalyzerBeatsPlugin() override = default;
+
+    virtual bool finalizeWithProgress(
+            const AnalyzerProgressCallback& progress) {
+        Q_UNUSED(progress);
+        return finalize();
+    }
 
     virtual bool supportsBeatTracking() const = 0;
     virtual mixxx::Bpm getBpm() const {

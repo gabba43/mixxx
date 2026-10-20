@@ -8,6 +8,7 @@
 #include "analyzer/constants.h"
 #include "analyzer/plugins/analyzerqueenmarybeats.h"
 #include "analyzer/plugins/beattrackingrefiner.h"
+#include "track/beatfactory.h"
 
 namespace mixxx {
 namespace {
@@ -41,7 +42,12 @@ DFConfig makeDetectionFunctionConfig(int stepSizeFrames, int windowSize) {
 } // namespace
 
 AnalyzerQueenMaryBeats::AnalyzerQueenMaryBeats(bool fixedTempo)
-        : m_fixedTempo(fixedTempo),
+        : AnalyzerQueenMaryBeats(fixedTempo ? BeatGridMode::Constant
+                                            : BeatGridMode::Variable) {
+}
+
+AnalyzerQueenMaryBeats::AnalyzerQueenMaryBeats(BeatGridMode mode)
+        : m_tempoMode(mode),
           m_windowSize(0),
           m_stepSizeFrames(0) {
 }
@@ -63,7 +69,7 @@ bool AnalyzerQueenMaryBeats::initialize(mixxx::audio::SampleRate sampleRate) {
     m_windowSize = MathUtilities::nextPowerOfTwo(m_sampleRate / kMaximumBinSizeHz);
     m_pDetectionFunction = std::make_unique<DetectionFunction>(
             makeDetectionFunctionConfig(m_stepSizeFrames, m_windowSize));
-    if (m_fixedTempo) {
+    if (m_tempoMode != BeatGridMode::Variable) {
         m_pPulseDetectionFunction = std::make_unique<DetectionFunction>(
                 makeDetectionFunctionConfig(m_stepSizeFrames, m_windowSize));
         m_lowBandWindow.resize(m_windowSize);
@@ -151,7 +157,13 @@ bool AnalyzerQueenMaryBeats::finalize() {
         m_resultBeats.push_back(result);
     }
 
-    if (m_fixedTempo) {
+    bool refine = m_tempoMode == BeatGridMode::Constant;
+    if (m_tempoMode == BeatGridMode::Auto) {
+        const auto automatic = BeatFactory::makePreferredBeats(
+                m_resultBeats, {}, BeatGridMode::Auto, m_sampleRate, true);
+        refine = automatic && automatic->hasConstantTempo();
+    }
+    if (refine) {
         const std::vector<double> pulseOnsets(
                 m_pulseDetectionResults.begin() + 2,
                 m_pulseDetectionResults.begin() + nonZeroCount);

@@ -3115,6 +3115,11 @@ if(BUILD_TESTING)
   endif()
 
   set_target_properties(mixxx-test PROPERTIES AUTOMOC ON)
+  target_include_directories(
+    mixxx-test
+    PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/mixxx-lib_autogen/include$<$<BOOL:${CMAKE_CONFIGURATION_TYPES}>:_$<CONFIG>>"
+  )
   target_link_libraries(
     mixxx-test
     PRIVATE mixxx-lib mixxx-gitinfostore mixxx-xwax GTest::gtest GTest::gmock

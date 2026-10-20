@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analyzer/analyzerprogress.h"
 #include "analyzer/analyzertrack.h"
 #include "audio/signalinfo.h"
 #include "audio/types.h"
@@ -40,6 +41,15 @@ class Analyzer {
     // samples have been processed.
     virtual void storeResults(TrackPointer pTrack) = 0;
 
+    virtual bool hasFinalizationProgress() const {
+        return false;
+    }
+    virtual void storeResultsWithProgress(
+            TrackPointer pTrack, const AnalyzerProgressCallback& progress) {
+        Q_UNUSED(progress);
+        storeResults(pTrack);
+    }
+
     // Discard any temporary results or free allocated memory.
     // This function will be invoked after the results have been
     // stored or if processing aborted preliminary.
@@ -67,6 +77,10 @@ class AnalyzerWithState final {
         return m_active;
     }
 
+    bool hasFinalizationProgress() const {
+        return m_active && m_analyzer->hasFinalizationProgress();
+    }
+
     bool initialize(const AnalyzerTrack& track,
             mixxx::audio::SampleRate sampleRate,
             mixxx::audio::ChannelCount channelCount,
@@ -86,9 +100,10 @@ class AnalyzerWithState final {
         }
     }
 
-    void finish(const AnalyzerTrack& track) {
+    void finish(const AnalyzerTrack& track,
+            const AnalyzerProgressCallback& progress = {}) {
         if (m_active) {
-            m_analyzer->storeResults(track.getTrack());
+            m_analyzer->storeResultsWithProgress(track.getTrack(), progress);
             m_analyzer->cleanup();
             m_active = false;
         }

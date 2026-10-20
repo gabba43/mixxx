@@ -6,6 +6,7 @@
 
 #include "analyzer/plugins/analyzerplugin.h"
 #include "analyzer/plugins/buffering_utils.h"
+#include "track/beatgridmode.h"
 
 class DetectionFunction;
 
@@ -24,6 +25,7 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     }
 
     explicit AnalyzerQueenMaryBeats(bool fixedTempo = true);
+    explicit AnalyzerQueenMaryBeats(BeatGridMode mode);
     ~AnalyzerQueenMaryBeats() override;
 
     AnalyzerPluginInfo info() const override {
@@ -43,7 +45,7 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     }
 
   private:
-    const bool m_fixedTempo;
+    const BeatGridMode m_tempoMode;
     std::unique_ptr<DetectionFunction> m_pDetectionFunction;
     std::unique_ptr<DetectionFunction> m_pPulseDetectionFunction;
     DownmixAndOverlapHelper m_helper;

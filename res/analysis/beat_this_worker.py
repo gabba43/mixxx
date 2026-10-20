@@ -8,6 +8,35 @@ from pathlib import Path
 import sys
 
 
+def report_progress(value):
+    print(f"MIXXX_BEAT_THIS_PROGRESS {value:.6f}", file=sys.stderr, flush=True)
+
+
+def predict_with_progress(tracker, signal, sample_rate):
+    from beat_this.inference import split_piece
+
+    spect = tracker.signal2spect(signal, sample_rate)
+    report_progress(0.2)
+    chunks, _ = split_piece(spect, 1500, border_size=6, avoid_short_end=True)
+    total = len(chunks)
+    del chunks
+    completed = 0
+
+    def chunk_completed(_module, _inputs, _output):
+        nonlocal completed
+        completed += 1
+        report_progress(0.2 + 0.75 * min(completed / total, 1))
+
+    hook = tracker.model.register_forward_hook(chunk_completed)
+    try:
+        beat_logits, downbeat_logits = tracker.spect2frames(spect)
+    finally:
+        hook.remove()
+    result = tracker.frames2beats(beat_logits, downbeat_logits)
+    report_progress(0.98)
+    return result
+
+
 def verify_checkpoint(path, expected_sha256):
     checkpoint = Path(path)
     if not checkpoint.is_file():
@@ -45,6 +74,7 @@ def validate_positions(values, duration):
 
 def analyze(args):
     checkpoint = verify_checkpoint(args.checkpoint, args.sha256)
+    report_progress(0.01)
     if not 8000 <= args.sample_rate <= 192000:
         raise ValueError("Unsupported sample rate")
     audio_path = Path(args.audio)
@@ -58,6 +88,7 @@ def analyze(args):
     import torch
     from beat_this.inference import Audio2Beats
 
+    report_progress(0.05)
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
     signal = np.memmap(audio_path, dtype=np.float32, mode="r")
@@ -68,12 +99,16 @@ def analyze(args):
         tracker = Audio2Beats(
             checkpoint_path=str(checkpoint), device="cpu", dbn=False
         )
-        beats, downbeats = tracker(signal, args.sample_rate)
+        report_progress(0.1)
+        beats, downbeats = predict_with_progress(
+            tracker, signal, args.sample_rate
+        )
     beats = validate_positions(beats, duration)
     downbeats = validate_positions(downbeats, duration)
     beat_set = set(beats)
     if any(beat not in beat_set for beat in downbeats):
         raise ValueError("Downbeats must be a subset of beats")
+    report_progress(1.0)
     return {
         "version": 1,
         "model_sha256": args.sha256.lower(),

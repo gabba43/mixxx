@@ -1,6 +1,7 @@
 #include "preferences/dialog/dlgprefbeats.h"
 
 #include <QFileDialog>
+#include <QSignalBlocker>
 
 #include "analyzer/analyzerbeats.h"
 #include "analyzer/plugins/analyzerbeatthis.h"
@@ -9,14 +10,21 @@
 
 DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
         : DlgPreferencePage(parent),
+          m_pConfig(pConfig),
           m_bpmSettings(pConfig),
           m_bAnalyzerEnabled(m_bpmSettings.getBpmDetectionEnabledDefault()),
-          m_bFixedTempoEnabled(m_bpmSettings.getFixedTempoAssumptionDefault()),
+          m_tempoMode(m_bpmSettings.getTempoModeDefault()),
           m_bFastAnalysisEnabled(m_bpmSettings.getFastAnalysisDefault()),
           m_bReanalyze(m_bpmSettings.getReanalyzeWhenSettingsChangeDefault()),
           m_bReanalyzeImported(m_bpmSettings.getReanalyzeImportedDefault()),
           m_stemStrategy(BeatDetectionSettings::StemStrategy::Disabled) {
     setupUi(this);
+    comboBoxTempoMode->addItem(
+            tr("Auto"), static_cast<int>(mixxx::BeatGridMode::Auto));
+    comboBoxTempoMode->addItem(
+            tr("Constant"), static_cast<int>(mixxx::BeatGridMode::Constant));
+    comboBoxTempoMode->addItem(
+            tr("Variable"), static_cast<int>(mixxx::BeatGridMode::Variable));
 
     m_availablePlugins = AnalyzerBeats::availablePlugins();
     for (const auto& info : std::as_const(m_availablePlugins)) {
@@ -59,14 +67,10 @@ DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
 #endif
             this,
             &DlgPrefBeats::analyzerEnabled);
-    connect(checkBoxFixedTempo,
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-            &QCheckBox::checkStateChanged,
-#else
-            &QCheckBox::stateChanged,
-#endif
+    connect(comboBoxTempoMode,
+            &QComboBox::currentIndexChanged,
             this,
-            &DlgPrefBeats::fixedtempoEnabled);
+            &DlgPrefBeats::tempoModeSelected);
     connect(checkBoxFastAnalysis,
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
             &QCheckBox::checkStateChanged,
@@ -111,7 +115,7 @@ void DlgPrefBeats::slotResetToDefaults() {
         m_selectedAnalyzerId = m_availablePlugins[0].id();
     }
     m_bAnalyzerEnabled = m_bpmSettings.getBpmDetectionEnabledDefault();
-    m_bFixedTempoEnabled = m_bpmSettings.getFixedTempoAssumptionDefault();
+    m_tempoMode = m_bpmSettings.getTempoModeDefault();
     m_bFastAnalysisEnabled = m_bpmSettings.getFastAnalysisDefault();
     m_bReanalyze = m_bpmSettings.getReanalyzeWhenSettingsChangeDefault();
     m_bReanalyzeImported = m_bpmSettings.getReanalyzeImportedDefault();
@@ -125,7 +129,7 @@ void DlgPrefBeats::slotResetToDefaults() {
 }
 
 void DlgPrefBeats::pluginSelected(int i) {
-    if (i == -1) {
+    if (i < 0 || i >= m_availablePlugins.size()) {
         return;
     }
     m_selectedAnalyzerId = m_availablePlugins[i].id();
@@ -142,13 +146,12 @@ void DlgPrefBeats::analyzerEnabled(int i) {
     updateGui();
 }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-void DlgPrefBeats::fixedtempoEnabled(Qt::CheckState state) {
-    m_bFixedTempoEnabled = (state == Qt::Checked);
-#else
-void DlgPrefBeats::fixedtempoEnabled(int i) {
-    m_bFixedTempoEnabled = static_cast<bool>(i);
-#endif
+void DlgPrefBeats::tempoModeSelected(int i) {
+    if (i < 0 || i >= comboBoxTempoMode->count()) {
+        return;
+    }
+    m_tempoMode = static_cast<mixxx::BeatGridMode>(
+            comboBoxTempoMode->itemData(i).toInt());
     updateGui();
 }
 
@@ -156,7 +159,7 @@ void DlgPrefBeats::slotUpdate() {
     // Read true values from config
     m_selectedAnalyzerId = m_bpmSettings.getBeatPluginId();
     m_bAnalyzerEnabled = m_bpmSettings.getBpmDetectionEnabled();
-    m_bFixedTempoEnabled = m_bpmSettings.getFixedTempoAssumption();
+    m_tempoMode = m_bpmSettings.getTempoMode();
     m_bReanalyze = m_bpmSettings.getReanalyzeWhenSettingsChange();
     m_bReanalyzeImported = m_bpmSettings.getReanalyzeImported();
     m_bFastAnalysisEnabled = m_bpmSettings.getFastAnalysis();
@@ -169,20 +172,24 @@ void DlgPrefBeats::slotUpdate() {
 }
 
 void DlgPrefBeats::updateGui() {
+    const QSignalBlocker pluginBlocker(comboBoxBeatPlugin);
+    const QSignalBlocker enabledBlocker(checkBoxAnalyzerEnabled);
+    const QSignalBlocker tempoModeBlocker(comboBoxTempoMode);
+    const QSignalBlocker fastAnalysisBlocker(checkBoxFastAnalysis);
+    const QSignalBlocker reanalyzeBlocker(checkBoxReanalyze);
+    const QSignalBlocker importedBlocker(checkBoxReanalyzeImported);
+    const QSignalBlocker stemBlocker(comboBoxStemStrategy);
     groupBoxBeatThis->setVisible(
             m_selectedAnalyzerId == mixxx::AnalyzerBeatThis::pluginInfo().id());
     groupBoxBeatThis->setEnabled(m_bAnalyzerEnabled);
-    checkBoxFixedTempo->setEnabled(m_bAnalyzerEnabled);
+    comboBoxTempoMode->setEnabled(m_bAnalyzerEnabled);
     comboBoxBeatPlugin->setEnabled(m_bAnalyzerEnabled);
     checkBoxAnalyzerEnabled->setChecked(m_bAnalyzerEnabled);
     // Fast analysis cannot be combined with non-constant tempo beatgrids.
-    checkBoxFastAnalysis->setEnabled(m_bAnalyzerEnabled && m_bFixedTempoEnabled);
+    checkBoxFastAnalysis->setEnabled(
+            m_bAnalyzerEnabled && m_tempoMode == mixxx::BeatGridMode::Constant);
     checkBoxReanalyze->setEnabled(m_bAnalyzerEnabled);
     checkBoxReanalyzeImported->setEnabled(m_bAnalyzerEnabled);
-
-    if (!m_bAnalyzerEnabled) {
-        return;
-    }
 
     if (m_availablePlugins.size() > 0) {
         bool found = false;
@@ -192,7 +199,7 @@ void DlgPrefBeats::updateGui() {
                 found = true;
                 comboBoxBeatPlugin->setCurrentIndex(i);
                 if (!m_availablePlugins[i].isConstantTempoSupported()) {
-                    checkBoxFixedTempo->setEnabled(false);
+                    comboBoxTempoMode->setEnabled(false);
                 }
                 break;
             }
@@ -203,9 +210,11 @@ void DlgPrefBeats::updateGui() {
         }
     }
 
-    checkBoxFixedTempo->setChecked(m_bFixedTempoEnabled);
+    comboBoxTempoMode->setCurrentIndex(
+            comboBoxTempoMode->findData(static_cast<int>(m_tempoMode)));
     // Fast analysis cannot be combined with non-constant tempo beatgrids.
-    checkBoxFastAnalysis->setChecked(m_bFastAnalysisEnabled && m_bFixedTempoEnabled);
+    checkBoxFastAnalysis->setChecked(m_bFastAnalysisEnabled &&
+            m_tempoMode == mixxx::BeatGridMode::Constant);
 
     checkBoxReanalyze->setChecked(m_bReanalyze);
     checkBoxReanalyzeImported->setChecked(m_bReanalyzeImported);
@@ -261,7 +270,7 @@ void DlgPrefBeats::slotStemStrategyChanged(int index) {
 void DlgPrefBeats::slotApply() {
     m_bpmSettings.setBeatPluginId(m_selectedAnalyzerId);
     m_bpmSettings.setBpmDetectionEnabled(m_bAnalyzerEnabled);
-    m_bpmSettings.setFixedTempoAssumption(m_bFixedTempoEnabled);
+    m_bpmSettings.setTempoMode(m_tempoMode);
     m_bpmSettings.setReanalyzeWhenSettingsChange(m_bReanalyze);
     m_bpmSettings.setReanalyzeImported(m_bReanalyzeImported);
     m_bpmSettings.setFastAnalysis(m_bFastAnalysisEnabled);
@@ -270,4 +279,7 @@ void DlgPrefBeats::slotApply() {
     m_bpmSettings.setBeatThisModel(lineEditBeatThisModel->text().trimmed());
     m_bpmSettings.setBeatThisModelSha256(
             lineEditBeatThisHash->text().trimmed().toLower());
+    if (!m_pConfig->save()) {
+        qWarning() << "Failed to save beat detection preferences";
+    }
 }

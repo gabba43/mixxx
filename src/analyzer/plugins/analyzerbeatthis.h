@@ -30,6 +30,8 @@ class AnalyzerBeatThis final : public AnalyzerBeatsPlugin {
     bool initialize(audio::SampleRate sampleRate) override;
     bool processSamples(const CSAMPLE* input, SINT count) override;
     bool finalize() override;
+    bool finalizeWithProgress(
+            const AnalyzerProgressCallback& progress) override;
     bool supportsBeatTracking() const override {
         return true;
     }

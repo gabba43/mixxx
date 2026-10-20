@@ -25,13 +25,17 @@ class AnalyzerBeats : public Analyzer {
             SINT frameLength) override;
     bool processSamples(const CSAMPLE* pIn, SINT count) override;
     void storeResults(TrackPointer tio) override;
+    bool hasFinalizationProgress() const override;
+    void storeResultsWithProgress(TrackPointer track,
+            const AnalyzerProgressCallback& progress) override;
     void cleanup() override;
 
   private:
     bool shouldAnalyze(TrackPointer pTrack) const;
     static QHash<QString, QString> getExtraVersionInfo(const QString& pluginId,
             bool bPreferencesFastAnalysis,
-            const QString& modelSha256);
+            const QString& modelSha256,
+            mixxx::BeatGridMode mode);
 
     BeatDetectionSettings m_bpmSettings;
     const QString m_resourcePath;
@@ -39,6 +43,7 @@ class AnalyzerBeats : public Analyzer {
     const bool m_enforceBpmDetection;
     QString m_pluginId;
     QString m_modelSha256;
+    mixxx::BeatGridMode m_tempoMode = mixxx::BeatGridMode::Auto;
     bool m_bPreferencesReanalyzeOldBpm;
     bool m_bPreferencesReanalyzeImported;
     bool m_bPreferencesFixedTempo;
