@@ -57,7 +57,12 @@ packages during analysis. The process supports cancellation and has a
 10-minute limit per track. The analyzer commits results only after successful
 validation; a failed run leaves any grid still present on the track untouched.
 
-The worker requires Beat This! 1.1.0. A tested Linux CPU setup is:
+For an interactive user-local Linux build/install, including the Python
+environment, checkpoint and automatic path configuration, see
+[LINUX_INSTALL.md](LINUX_INSTALL.md) and run `python3 tools/install-linux.py`.
+It offers compilation alone or installation with a desktop starter.
+
+The worker requires Beat This! 1.1.0. A manual Linux CPU setup is:
 
 ```sh
 python3 -m venv /path/to/beat-this-env
@@ -71,8 +76,8 @@ Expected `final0` SHA-256:
 `8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331`.
 The worker verifies this fingerprint before loading the checkpoint. Other
 checkpoints require their own independently verified fingerprint. Models
-and Python dependencies are not bundled into the Mixxx application by this
-change; packaging for end users remains separate work.
+and Python dependencies are not bundled into the Mixxx binary. The Linux
+installer sets them up separately in user-owned directories.
 
 In this cloud environment the interpreter is
 `/workspace/mixxx-beat-this-env/bin/python` and the checkpoint is
