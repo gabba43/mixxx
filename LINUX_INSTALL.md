@@ -77,7 +77,9 @@ installed automatically into a venv, never into system Python.
 
 The native build requires CMake >= 3.22, a C++20 compiler, pkg-config,
 Make or Ninja, and Mixxx's development libraries. CMake checks the libraries
-before compilation and Python/model installation. Allow several GB of free
+before compilation. Model availability is checked before the native build,
+so an unavailable model server cannot waste a first compilation.
+Allow several GB of free
 disk space; a first native build can take considerably longer than Python
 setup. Default parallelism is at most four compiler processes; reduce it
 with `--jobs 2` on machines with limited memory.
@@ -157,9 +159,63 @@ before changing them, the script saves `mixxx.cfg.before-beat-this`.
 Use `--model-file /path/to/final0.ckpt` to copy an already downloaded official
 checkpoint. The script verifies SHA-256 before publishing the file and
 reuses matching files on subsequent runs. Failed downloads leave no model
-at the final destination. Pip and initial model downloads require network
-access; inference remains local. See [BEAT_ANALYSIS.md](BEAT_ANALYSIS.md)
+at the final destination. It also looks for `final0.ckpt` in the current
+directory or beside the installer, and for `beat_this-final0.ckpt` or
+`final0.ckpt` in the usual PyTorch `hub/checkpoints` cache. `TORCH_HOME`
+and `XDG_CACHE_HOME` are respected. Only files matching the official
+fingerprint are reused automatically. An explicitly supplied verified file
+can replace a damaged destination checkpoint.
+
+Transient download failures, including HTTP 503, are retried up to three
+times with short delays. If all attempts fail in an interactive terminal,
+the script offers to use a local checkpoint instead. In non-interactive
+mode it exits with the actual model error and a command to continue; native
+dependency instructions are not shown for a model-server outage.
+
+An additional HTTPS source can be supplied with
+`--model-url https://example.org/final0.ckpt` (repeatable). Supplied URLs are
+tried before the official source. Every source must provide the exact same
+SHA-256-verified `final0` bytes. The authors currently document their JKU
+cloud as the download source; no unverified third-party mirror is enabled
+by default. Pip and initial model downloads require network access;
+inference remains local. See [BEAT_ANALYSIS.md](BEAT_ANALYSIS.md)
 for model provenance and analysis behavior.
+
+## Continue after a model download failure
+
+A successful `[100%] Built target mixxx` means compilation is complete.
+In **build** mode the executable deliberately stays in the build cache;
+it is not moved into the installation prefix. Do not delete that cache
+after a model download failure.
+
+Update the script in your source checkout, then finish setup with a local
+official checkpoint, keeping the already compiled executable:
+
+```sh
+python3 "$HOME/.local/share/mixxx-beat-this/source/tools/install-linux.py" \
+  --mode build --skip-build --model-file "/path/to/final0.ckpt"
+```
+
+Replace the model path with your local file. `--skip-build` skips CMake
+configuration and compilation and verifies that the build directory contains
+an executable and a CMake cache referring to the selected source directory.
+Keep the same `--build-dir` and other custom paths as in the first run.
+Use this option only with the intended completed build; changes to C++
+sources still require recompilation.
+
+To install that completed build **with a starter**, reuse the previously
+created build-mode Python environment and model:
+
+```sh
+python3 "$HOME/.local/share/mixxx-beat-this/source/tools/install-linux.py" \
+  --mode install --skip-build \
+  --runtime-dir "$HOME/.local/share/mixxx-beat-this/runtime" \
+  --model-file "/path/to/final0.ckpt"
+```
+
+This second command runs `cmake --install` into the user prefix and creates
+the terminal/desktop starters. It performs no compilation. Pip checks the
+existing runtime and can still require network access for package metadata.
 
 To remove the installation, remove its prefix, starter symlink and desktop
 entry. Build-mode runtimes, sources and build directories can be removed

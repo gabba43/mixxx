@@ -4,6 +4,7 @@
 
 import argparse
 import hashlib
+import http.client
 import os
 from pathlib import Path
 import platform
@@ -12,6 +13,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 REPOSITORY = "https://github.com/gabba43/mixxx.git"
@@ -28,6 +32,10 @@ SOURCE_FILES = (
     "res/analysis/beat_this_worker.py",
     "tools/requirements-beat-this.txt",
 )
+
+
+class ModelDownloadError(ValueError):
+    pass
 
 
 def run(command, **kwargs):
@@ -225,30 +233,14 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def install_model(destination, existing=None):
+def write_verified_model(destination, source):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        if sha256(destination) != MODEL_SHA256:
-            raise ValueError(
-                f"Checkpoint checksum mismatch; replace {destination}"
-            )
-        print(f"Reusing verified checkpoint: {destination}", flush=True)
-        return
     with tempfile.NamedTemporaryFile(
         dir=destination.parent, delete=False
     ) as output:
         temporary = Path(output.name)
         try:
-            if existing:
-                with absolute(existing).open("rb") as stream:
-                    shutil.copyfileobj(stream, output)
-            else:
-                print(
-                    f"Downloading final0 checkpoint (~78 MiB): {MODEL_URL}",
-                    flush=True,
-                )
-                with urllib.request.urlopen(MODEL_URL, timeout=120) as stream:
-                    shutil.copyfileobj(stream, output)
+            shutil.copyfileobj(source, output)
             output.flush()
             if sha256(temporary) != MODEL_SHA256:
                 raise ValueError(
@@ -258,6 +250,86 @@ def install_model(destination, existing=None):
             temporary.replace(destination)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def local_models():
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    torch_home = Path(os.environ.get("TORCH_HOME", cache / "torch"))
+    return (
+        Path.cwd() / "final0.ckpt",
+        Path(__file__).resolve().parent / "final0.ckpt",
+        torch_home / "hub/checkpoints/beat_this-final0.ckpt",
+        torch_home / "hub/checkpoints/final0.ckpt",
+    )
+
+
+def install_model(destination, existing=None, urls=None):
+    if destination.is_file() and sha256(destination) == MODEL_SHA256:
+        print(f"Reusing verified checkpoint: {destination}", flush=True)
+        return
+    if existing:
+        with absolute(existing).open("rb") as stream:
+            write_verified_model(destination, stream)
+        return
+    for candidate in local_models():
+        if candidate.is_file() and sha256(candidate) == MODEL_SHA256:
+            print(f"Using verified local checkpoint: {candidate}", flush=True)
+            with candidate.open("rb") as stream:
+                write_verified_model(destination, stream)
+            return
+    if destination.exists():
+        raise ValueError(
+            f"Checkpoint checksum mismatch: {destination}; "
+            "provide a verified replacement with --model-file"
+        )
+    failures = []
+    for url in urls or [MODEL_URL]:
+        if urllib.parse.urlsplit(url).scheme != "https":
+            raise ValueError("--model-url requires an HTTPS URL")
+        for attempt in range(3):
+            print(
+                f"Downloading final0 (~78 MiB), attempt {attempt + 1}/3: "
+                f"{url}",
+                flush=True,
+            )
+            try:
+                with urllib.request.urlopen(url, timeout=45) as stream:
+                    write_verified_model(destination, stream)
+                return
+            except ValueError as error:
+                failures.append(f"{url}: {error}")
+                break
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                http.client.IncompleteRead,
+            ) as error:
+                print(f"Model download failed: {error}", file=sys.stderr)
+                transient = not isinstance(error, urllib.error.HTTPError) or (
+                    error.code in {408, 425, 429, 500, 502, 503, 504}
+                )
+                if not transient or attempt == 2:
+                    failures.append(f"{url}: {error}")
+                    break
+                time.sleep(2**attempt)
+    raise ModelDownloadError(
+        "Could not download the model:\n" + "\n".join(failures)
+    )
+
+
+def existing_build(build, source):
+    cache = build / "CMakeCache.txt"
+    if cache.is_file() and os.access(build / "mixxx", os.X_OK):
+        for line in cache.read_text(encoding="utf-8").splitlines():
+            if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL="):
+                if Path(line.partition("=")[2]).resolve() == source.resolve():
+                    return
+                break
+    raise ValueError(
+        f"--skip-build requires a completed build of {source} in {build}; "
+        "rerun without --skip-build to compile"
+    )
 
 
 def write_atomic(path, content, mode=0o600):
@@ -420,6 +492,11 @@ def main(argv=None):
         default=cache_home / "mixxx-beat-this/build",
     )
     parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Reuse a completed build; only finish installation/runtime setup",
+    )
+    parser.add_argument(
         "--profile", type=absolute, default=config_home / "mixxx-beat-this"
     )
     parser.add_argument(
@@ -450,6 +527,12 @@ def main(argv=None):
         help="Copy an already downloaded official final0 checkpoint",
     )
     parser.add_argument(
+        "--model-url",
+        action="append",
+        default=[],
+        help="Additional HTTPS final0 source, tried before the official URL",
+    )
+    parser.add_argument(
         "--cmake-arg",
         action="append",
         default=[],
@@ -477,7 +560,12 @@ def main(argv=None):
         )
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
-    for tool in ("cmake", "pkg-config"):
+    build_tools = (
+        ("cmake", "pkg-config")
+        if not args.skip_build
+        else (("cmake",) if mode == "install" else ())
+    )
+    for tool in build_tools:
         if not shutil.which(tool):
             raise ValueError(f"Missing build tool: {tool}; see --print-deps")
     python = choose_python(args.python)
@@ -487,18 +575,66 @@ def main(argv=None):
         args.repository,
         args.ref,
     )
-    configure_build(source, args.build_dir, args.prefix, args.cmake_arg)
-    run(["cmake", "--build", args.build_dir, "--parallel", args.jobs])
-    if mode == "install":
-        run(["cmake", "--install", args.build_dir, "--prefix", args.prefix])
     runtime = args.runtime_dir or (
         args.prefix
         if mode == "install"
         else data_home / "mixxx-beat-this/runtime"
     )
-    interpreter = install_runtime(python, source, runtime, architecture)
+    if args.skip_build:
+        existing_build(args.build_dir, source)
     model = runtime / "models/final0.ckpt"
-    install_model(model, args.model_file)
+    try:
+        try:
+            install_model(model, args.model_file, args.model_url + [MODEL_URL])
+        except ModelDownloadError:
+            if not sys.stdin.isatty():
+                raise
+            local = input(
+                "Download nicht erreichbar. Pfad zur lokalen final0.ckpt "
+                "(leer = abbrechen): "
+            ).strip()
+            if not local:
+                raise
+            install_model(model, local)
+    except (OSError, ValueError) as error:
+        resume = [
+            sys.executable,
+            Path(__file__).resolve(),
+            "--mode",
+            mode,
+            "--source-dir",
+            source,
+            "--build-dir",
+            args.build_dir,
+            "--prefix",
+            args.prefix,
+            "--runtime-dir",
+            runtime,
+            "--profile",
+            args.profile,
+            "--bin-dir",
+            args.bin_dir,
+            "--python",
+            python,
+        ]
+        try:
+            existing_build(args.build_dir, source)
+        except (OSError, ValueError):
+            pass
+        else:
+            resume.append("--skip-build")
+        raise ModelDownloadError(
+            f"Model setup failed: {error}\n"
+            "Existing build files and Python packages have been preserved.\n"
+            "To retry, or append --model-file /path/to/final0.ckpt:\n"
+            + shlex.join([str(arg) for arg in resume])
+        ) from error
+    if not args.skip_build:
+        configure_build(source, args.build_dir, args.prefix, args.cmake_arg)
+        run(["cmake", "--build", args.build_dir, "--parallel", args.jobs])
+    if mode == "install":
+        run(["cmake", "--install", args.build_dir, "--prefix", args.prefix])
+    interpreter = install_runtime(python, source, runtime, architecture)
     configure_profile(args.profile, interpreter, model)
     if mode == "install":
         launcher = install_launchers(
@@ -531,6 +667,9 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         main()
+    except ModelDownloadError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(
             f"Installation failed: {error}\n"

@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("install-linux.py")
@@ -166,6 +167,134 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             installer.install_model(destination)
 
+    def test_transient_503_is_retried_then_succeeds(self):
+        data = b"model after temporary outage"
+        destination = self.root / "model.ckpt"
+        unavailable = urllib.error.HTTPError(
+            installer.MODEL_URL, 503, "Service Unavailable", {}, None
+        )
+        with patch.object(
+            installer, "MODEL_SHA256", hashlib.sha256(data).hexdigest()
+        ), patch.object(
+            installer, "local_models", return_value=()
+        ), patch.object(
+            installer.urllib.request,
+            "urlopen",
+            side_effect=[unavailable, unavailable, io.BytesIO(data)],
+        ) as download, patch.object(
+            installer.time, "sleep"
+        ) as pause:
+            installer.install_model(destination)
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual(pause.call_count, 2)
+        self.assertEqual(destination.read_bytes(), data)
+
+    def test_custom_source_falls_back_after_bad_hash_or_permanent_error(self):
+        data = b"trusted final0 bytes"
+        mirror = "https://mirror.example.invalid/final0.ckpt"
+        missing = urllib.error.HTTPError(mirror, 404, "Not Found", {}, None)
+        for first in (io.BytesIO(b"wrong model"), missing):
+            destination = self.root / "models/final0.ckpt"
+            with patch.object(
+                installer, "MODEL_SHA256", hashlib.sha256(data).hexdigest()
+            ), patch.object(
+                installer, "local_models", return_value=()
+            ), patch.object(
+                installer.urllib.request,
+                "urlopen",
+                side_effect=[first, io.BytesIO(data)],
+            ) as download, patch.object(
+                installer.time, "sleep"
+            ) as pause:
+                installer.install_model(
+                    destination, urls=[mirror, installer.MODEL_URL]
+                )
+            self.assertEqual(download.call_count, 2)
+            self.assertEqual(download.call_args_list[0].args[0], mirror)
+            self.assertEqual(
+                download.call_args_list[1].args[0], installer.MODEL_URL
+            )
+            pause.assert_not_called()
+            self.assertEqual(destination.read_bytes(), data)
+            self.assertEqual(list(destination.parent.iterdir()), [destination])
+            destination.unlink()
+
+    def test_interrupted_transfer_restarts_without_leaving_partial_model(self):
+        class Interrupted(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise ConnectionResetError("interrupted download")
+                return super().read(3)
+
+        destination = self.root / "models/final0.ckpt"
+        data = b"the complete checkpoint"
+        with patch.object(
+            installer, "MODEL_SHA256", hashlib.sha256(data).hexdigest()
+        ), patch.object(
+            installer, "local_models", return_value=()
+        ), patch.object(
+            installer.urllib.request,
+            "urlopen",
+            side_effect=[Interrupted(data), io.BytesIO(data)],
+        ), patch.object(
+            installer.time, "sleep"
+        ):
+            installer.install_model(destination)
+        self.assertEqual(destination.read_bytes(), data)
+        self.assertEqual(list(destination.parent.iterdir()), [destination])
+
+    def test_local_cache_and_explicit_replacement_require_no_network(self):
+        data = b"verified cached model"
+        cached = self.root / "torch/beat_this-final0.ckpt"
+        cached.parent.mkdir()
+        cached.write_bytes(data)
+        destination = self.root / "models/final0.ckpt"
+        with patch.object(
+            installer, "MODEL_SHA256", hashlib.sha256(data).hexdigest()
+        ), patch.object(
+            installer, "local_models", return_value=[cached]
+        ), patch.object(
+            installer.urllib.request, "urlopen"
+        ) as download:
+            installer.install_model(destination)
+            destination.write_bytes(b"corrupt existing model")
+            installer.install_model(destination, existing=cached)
+            download.assert_not_called()
+        self.assertEqual(destination.read_bytes(), data)
+
+    def test_total_outage_is_bounded_and_keeps_destination_absent(self):
+        destination = self.root / "models/final0.ckpt"
+        unavailable = urllib.error.HTTPError(
+            installer.MODEL_URL, 503, "Service Unavailable", {}, None
+        )
+        with patch.object(
+            installer, "local_models", return_value=()
+        ), patch.object(
+            installer.urllib.request, "urlopen", side_effect=unavailable
+        ) as download, patch.object(
+            installer.time, "sleep"
+        ):
+            with self.assertRaises(installer.ModelDownloadError) as caught:
+                installer.install_model(destination)
+        self.assertIn("503", str(caught.exception))
+        self.assertEqual(download.call_count, 3)
+        self.assertFalse(destination.exists())
+
+    def test_skip_build_requires_matching_source_and_finished_executable(self):
+        build = self.root / "build"
+        build.mkdir()
+        binary = build / "mixxx"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+        cache = build / "CMakeCache.txt"
+        cache.write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={self.root}\n")
+        installer.existing_build(build, self.root)
+        with self.assertRaises(ValueError):
+            installer.existing_build(build, self.root / "other source")
+        binary.unlink()
+        with self.assertRaises(ValueError):
+            installer.existing_build(build, self.root)
+
     def test_starter_passes_paths_and_arguments_without_shell_expansion(self):
         prefix = self.root / 'Mixxx\'s $local % "quoted" \\ build'
         binary = prefix / "bin/mixxx"
@@ -236,7 +365,18 @@ class InstallerTests(unittest.TestCase):
 
     def test_build_mode_does_not_install_mixxx_or_create_starters(self):
         source = self.sources(self.root / "source")
-        for mode in ("build", "install"):
+        build = self.root / "build"
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={source}\n"
+        )
+        installer.write_atomic(build / "mixxx", "#!/bin/sh\nexit 0\n", 0o755)
+        for mode, skip in (
+            ("build", False),
+            ("install", False),
+            ("build", True),
+            ("install", True),
+        ):
             with contextlib.ExitStack() as stack:
                 stack.enter_context(
                     patch.object(installer.os, "geteuid", return_value=1000)
@@ -263,7 +403,9 @@ class InstallerTests(unittest.TestCase):
                         installer, "choose_python", return_value="python"
                     )
                 )
-                stack.enter_context(patch.object(installer, "configure_build"))
+                configure = stack.enter_context(
+                    patch.object(installer, "configure_build")
+                )
                 calls = stack.enter_context(patch.object(installer, "run"))
                 stack.enter_context(
                     patch.object(
@@ -280,7 +422,17 @@ class InstallerTests(unittest.TestCase):
                     patch.object(installer, "install_launchers")
                 )
                 stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-                installer.main(["--mode", mode, "--source-dir", str(source)])
+                args = [
+                    "--mode",
+                    mode,
+                    "--source-dir",
+                    str(source),
+                    "--build-dir",
+                    str(build),
+                ]
+                if skip:
+                    args.append("--skip-build")
+                installer.main(args)
                 installs = [
                     call
                     for call in calls.call_args_list
@@ -288,6 +440,71 @@ class InstallerTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(installs), int(mode == "install"))
                 self.assertEqual(launchers.call_count, int(mode == "install"))
+                self.assertEqual(configure.call_count, int(not skip))
+                builds = [
+                    call
+                    for call in calls.call_args_list
+                    if "--build" in call.args[0]
+                ]
+                self.assertEqual(len(builds), int(not skip))
+
+    def test_model_outage_prevents_build_and_gives_resume_command(self):
+        source = self.sources(self.root / "source")
+        build = self.root / "build"
+        installer.write_atomic(build / "mixxx", "#!/bin/sh\nexit 0\n", 0o755)
+        (build / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={source}\n"
+        )
+        with contextlib.ExitStack() as stack:
+            for target, name, value in (
+                (installer.os, "geteuid", 1000),
+                (installer.platform, "machine", "x86_64"),
+                (installer.platform, "libc_ver", ("glibc", "2.36")),
+                (installer.shutil, "which", "tool"),
+                (installer, "choose_python", "python3"),
+                (installer.sys.stdin, "isatty", False),
+            ):
+                stack.enter_context(
+                    patch.object(target, name, return_value=value)
+                )
+            stack.enter_context(
+                patch.object(
+                    installer,
+                    "install_model",
+                    side_effect=installer.ModelDownloadError("HTTP 503"),
+                )
+            )
+            configure = stack.enter_context(
+                patch.object(installer, "configure_build")
+            )
+            runtime = stack.enter_context(
+                patch.object(installer, "install_runtime")
+            )
+            profile = stack.enter_context(
+                patch.object(installer, "configure_profile")
+            )
+            with self.assertRaises(installer.ModelDownloadError) as caught:
+                installer.main(
+                    [
+                        "--mode",
+                        "build",
+                        "--source-dir",
+                        str(source),
+                        "--build-dir",
+                        str(build),
+                    ]
+                )
+        configure.assert_not_called()
+        runtime.assert_not_called()
+        profile.assert_not_called()
+        message = str(caught.exception)
+        self.assertIn("503", message)
+        self.assertIn("--model-file", message)
+        self.assertIn("--skip-build", message)
+        self.assertNotIn("--print-deps", message)
+        resume = shlex.split(message.splitlines()[-1])
+        self.assertEqual(resume[resume.index("--source-dir") + 1], str(source))
+        self.assertEqual(resume[resume.index("--build-dir") + 1], str(build))
 
     def test_existing_build_cache_keeps_build_type(self):
         build = self.root / "build"
