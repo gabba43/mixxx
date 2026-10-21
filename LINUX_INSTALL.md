@@ -81,8 +81,8 @@ before compilation. Model availability is checked before the native build,
 so an unavailable model server cannot waste a first compilation.
 Allow several GB of free
 disk space; a first native build can take considerably longer than Python
-setup. Default parallelism is at most four compiler processes; reduce it
-with `--jobs 2` on machines with limited memory.
+setup. The script asks for a **25%, 50% or 75% RAM budget** before compilation.
+It derives parallelism from that budget as described below.
 
 Native dependencies are distribution packages, or an existing user-local
 toolchain supplied through `--cmake-arg`. They are **not** automatically
@@ -145,6 +145,35 @@ New build directories use Release and disable tests/benchmarks. Existing
 CMake caches retain their build type and test options. Use separate build
 directories for different checkouts/toolchains. The script fixes install
 destinations to `bin`, `share` and `lib` under the selected prefix.
+
+## Compile RAM budget
+
+The interactive RAM question offers 25%, 50% and 75%, defaulting to 50%.
+Use `--ram-percent 25`, `--ram-percent 50` or `--ram-percent 75` to choose
+without a prompt; non-interactive runs default to 50%. `--skip-build` skips
+the RAM question and all compile resource-control setup.
+
+The budget uses the system RAM or a lower cgroup-v2 memory limit, including
+parent cgroups. It is capped at 80% of currently available memory to leave
+headroom for the running session. Parallel jobs are estimated at 1.5 GiB
+each, with at least one job, and capped by CPU count and an optional
+`--jobs` maximum. A percentage is an upper budget, not a requirement to
+allocate or fill that amount of RAM.
+
+When `systemd-run --user` supports a memory-controlled scope, the complete
+compile/link process tree runs with `MemoryMax` equal to the budget and
+`MemorySwapMax=0`. The script tests this support before starting the build.
+Exceeding the hard limit can terminate the build; choose a larger percentage
+if a single compilation unit or the linker needs more memory.
+
+Without a suitable user systemd session, only parallelism is adjusted.
+The script explicitly reports that this is an estimate and cannot enforce
+a hard aggregate RAM limit. Python package installation, model inference
+and normal Mixxx execution are outside this compile-only budget.
+
+```sh
+python3 tools/install-linux.py --mode build --ram-percent 50 --jobs 4
+```
 
 Close Mixxx using this profile before rerunning the script. Python packages
 and verified models are reused, and the native build is incremental. Before

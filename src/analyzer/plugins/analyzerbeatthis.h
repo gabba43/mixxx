@@ -35,6 +35,12 @@ class AnalyzerBeatThis final : public AnalyzerBeatsPlugin {
     bool supportsBeatTracking() const override {
         return true;
     }
+    bool hasFinalizationProgress() const override {
+        return true;
+    }
+    bool preservesBeatPositions() const override {
+        return true;
+    }
     QVector<audio::FramePos> getBeats() const override {
         return m_beats;
     }

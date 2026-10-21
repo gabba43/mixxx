@@ -32,6 +32,8 @@ class AnalyzerBeats : public Analyzer {
 
   private:
     bool shouldAnalyze(TrackPointer pTrack) const;
+    std::unique_ptr<mixxx::AnalyzerBeatsPlugin> makePlugin(
+            const QString& id, mixxx::BeatGridMode mode) const;
     static QHash<QString, QString> getExtraVersionInfo(const QString& pluginId,
             bool bPreferencesFastAnalysis,
             const QString& modelSha256,
@@ -43,6 +45,7 @@ class AnalyzerBeats : public Analyzer {
     const bool m_enforceBpmDetection;
     QString m_pluginId;
     QString m_modelSha256;
+    QHash<QString, QString> m_extraVersionInfo;
     mixxx::BeatGridMode m_tempoMode = mixxx::BeatGridMode::Auto;
     bool m_bPreferencesReanalyzeOldBpm;
     bool m_bPreferencesReanalyzeImported;

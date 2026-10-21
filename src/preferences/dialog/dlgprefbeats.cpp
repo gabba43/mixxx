@@ -5,6 +5,8 @@
 
 #include "analyzer/analyzerbeats.h"
 #include "analyzer/plugins/analyzerbeatthis.h"
+#include "analyzer/plugins/analyzercustombeats.h"
+#include "analyzer/plugins/analyzerqueenmarybeats.h"
 #include "defs_urls.h"
 #include "moc_dlgprefbeats.cpp"
 
@@ -29,6 +31,11 @@ DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
     m_availablePlugins = AnalyzerBeats::availablePlugins();
     for (const auto& info : std::as_const(m_availablePlugins)) {
         comboBoxBeatPlugin->addItem(info.name(), info.id());
+        if (info.id() == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id() ||
+                info.id() == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
+            comboBoxCustomConstant->addItem(info.name(), info.id());
+            comboBoxCustomVariable->addItem(info.name(), info.id());
+        }
     }
 
     connect(buttonBeatThisPython, &QPushButton::clicked, this, [this] {
@@ -59,6 +66,14 @@ DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
             &DlgPrefBeats::pluginSelected);
+    connect(comboBoxCustomConstant, &QComboBox::currentIndexChanged, this, [this] {
+        m_customConstantId = comboBoxCustomConstant->currentData().toString();
+        updateGui();
+    });
+    connect(comboBoxCustomVariable, &QComboBox::currentIndexChanged, this, [this] {
+        m_customVariableId = comboBoxCustomVariable->currentData().toString();
+        updateGui();
+    });
     connect(checkBoxAnalyzerEnabled,
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
             &QCheckBox::checkStateChanged,
@@ -101,6 +116,8 @@ DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
             &DlgPrefBeats::slotStemStrategyChanged);
 
     setScrollSafeGuard(comboBoxBeatPlugin);
+    setScrollSafeGuard(comboBoxCustomConstant);
+    setScrollSafeGuard(comboBoxCustomVariable);
 }
 
 DlgPrefBeats::~DlgPrefBeats() {
@@ -120,6 +137,9 @@ void DlgPrefBeats::slotResetToDefaults() {
     m_bReanalyze = m_bpmSettings.getReanalyzeWhenSettingsChangeDefault();
     m_bReanalyzeImported = m_bpmSettings.getReanalyzeImportedDefault();
     m_stemStrategy = m_bpmSettings.getStemStrategyDefault();
+    m_customConstantId = m_bpmSettings.getCustomConstantPluginDefault();
+    m_customVariableId = m_bpmSettings.getCustomVariablePluginDefault();
+    checkBoxQueenMaryDownbeats->setChecked(m_bpmSettings.getQueenMaryDownbeatsDefault());
     lineEditBeatThisPython->setText(m_bpmSettings.getBeatThisPythonDefault());
     lineEditBeatThisModel->setText(m_bpmSettings.getBeatThisModelDefault());
     lineEditBeatThisHash->setText(
@@ -164,6 +184,9 @@ void DlgPrefBeats::slotUpdate() {
     m_bReanalyzeImported = m_bpmSettings.getReanalyzeImported();
     m_bFastAnalysisEnabled = m_bpmSettings.getFastAnalysis();
     m_stemStrategy = m_bpmSettings.getStemStrategy();
+    m_customConstantId = m_bpmSettings.getCustomConstantPlugin();
+    m_customVariableId = m_bpmSettings.getCustomVariablePlugin();
+    checkBoxQueenMaryDownbeats->setChecked(m_bpmSettings.getQueenMaryDownbeats());
     lineEditBeatThisPython->setText(m_bpmSettings.getBeatThisPython());
     lineEditBeatThisModel->setText(m_bpmSettings.getBeatThisModel());
     lineEditBeatThisHash->setText(m_bpmSettings.getBeatThisModelSha256());
@@ -173,15 +196,35 @@ void DlgPrefBeats::slotUpdate() {
 
 void DlgPrefBeats::updateGui() {
     const QSignalBlocker pluginBlocker(comboBoxBeatPlugin);
+    const QSignalBlocker customConstantBlocker(comboBoxCustomConstant);
+    const QSignalBlocker customVariableBlocker(comboBoxCustomVariable);
     const QSignalBlocker enabledBlocker(checkBoxAnalyzerEnabled);
     const QSignalBlocker tempoModeBlocker(comboBoxTempoMode);
     const QSignalBlocker fastAnalysisBlocker(checkBoxFastAnalysis);
     const QSignalBlocker reanalyzeBlocker(checkBoxReanalyze);
     const QSignalBlocker importedBlocker(checkBoxReanalyzeImported);
     const QSignalBlocker stemBlocker(comboBoxStemStrategy);
-    groupBoxBeatThis->setVisible(
-            m_selectedAnalyzerId == mixxx::AnalyzerBeatThis::pluginInfo().id());
+    const bool custom = m_selectedAnalyzerId == mixxx::AnalyzerCustomBeats::pluginInfo().id();
+    const auto setChoice = [](QComboBox* box, QString* id, const QString& fallback) {
+        int index = box->findData(*id);
+        if (index < 0) {
+            *id = fallback;
+            index = box->findData(*id);
+        }
+        box->setCurrentIndex(index);
+    };
+    setChoice(comboBoxCustomConstant, &m_customConstantId, m_bpmSettings.getCustomConstantPluginDefault());
+    setChoice(comboBoxCustomVariable, &m_customVariableId, m_bpmSettings.getCustomVariablePluginDefault());
+    groupBoxCustomAnalysis->setVisible(custom);
+    groupBoxCustomAnalysis->setEnabled(m_bAnalyzerEnabled);
+    const auto beatThisId = mixxx::AnalyzerBeatThis::pluginInfo().id();
+    groupBoxBeatThis->setVisible(m_selectedAnalyzerId == beatThisId ||
+            (custom && (m_customConstantId == beatThisId || m_customVariableId == beatThisId)));
     groupBoxBeatThis->setEnabled(m_bAnalyzerEnabled);
+    const auto queenMaryId = mixxx::AnalyzerQueenMaryBeats::pluginInfo().id();
+    checkBoxQueenMaryDownbeats->setVisible(m_selectedAnalyzerId == queenMaryId ||
+            (custom && (m_customConstantId == queenMaryId || m_customVariableId == queenMaryId)));
+    checkBoxQueenMaryDownbeats->setEnabled(m_bAnalyzerEnabled);
     comboBoxTempoMode->setEnabled(m_bAnalyzerEnabled);
     comboBoxBeatPlugin->setEnabled(m_bAnalyzerEnabled);
     checkBoxAnalyzerEnabled->setChecked(m_bAnalyzerEnabled);
@@ -269,6 +312,9 @@ void DlgPrefBeats::slotStemStrategyChanged(int index) {
 
 void DlgPrefBeats::slotApply() {
     m_bpmSettings.setBeatPluginId(m_selectedAnalyzerId);
+    m_bpmSettings.setCustomConstantPlugin(m_customConstantId);
+    m_bpmSettings.setCustomVariablePlugin(m_customVariableId);
+    m_bpmSettings.setQueenMaryDownbeats(checkBoxQueenMaryDownbeats->isChecked());
     m_bpmSettings.setBpmDetectionEnabled(m_bAnalyzerEnabled);
     m_bpmSettings.setTempoMode(m_tempoMode);
     m_bpmSettings.setReanalyzeWhenSettingsChange(m_bReanalyze);

@@ -25,7 +25,7 @@ automatically shows a beat-grid for them, and allows you to synchronize tracks u
      </property>
     </widget>
    </item>
-   <item row="5" column="0">
+   <item row="6" column="0">
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
@@ -37,6 +37,18 @@ automatically shows a beat-grid for them, and allows you to synchronize tracks u
       </size>
      </property>
     </spacer>
+   </item>
+   <item row="5" column="0">
+    <widget class="QGroupBox" name="groupBoxCustomAnalysis">
+     <property name="title"><string>Custom Models</string></property>
+     <layout class="QFormLayout" name="customAnalysisForm">
+      <item row="0" column="0"><widget class="QLabel" name="labelCustomConstant"><property name="text"><string>Model for Constant</string></property><property name="buddy"><cstring>comboBoxCustomConstant</cstring></property></widget></item>
+      <item row="0" column="1"><widget class="QComboBox" name="comboBoxCustomConstant"/></item>
+      <item row="1" column="0"><widget class="QLabel" name="labelCustomVariable"><property name="text"><string>Model for Variable</string></property><property name="buddy"><cstring>comboBoxCustomVariable</cstring></property></widget></item>
+      <item row="1" column="1"><widget class="QComboBox" name="comboBoxCustomVariable"/></item>
+      <item row="2" column="0" colspan="2"><widget class="QLabel" name="labelCustomInfo"><property name="text"><string>Auto first checks the Model for Variable's beats across the full track. If a constant grid fits, it uses the Model for Constant; otherwise it keeps the Variable result. Beat This! uses the shared local model settings.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+     </layout>
+    </widget>
    </item>
    <item row="4" column="0">
     <widget class="QGroupBox" name="groupBoxBeatThis">
@@ -79,6 +91,12 @@ automatically shows a beat-grid for them, and allows you to synchronize tracks u
          <property name="toolTip"><string>Auto uses a constant grid when it fits the detected beats across the track. Constant forces a single tempo. Variable follows the detected beat positions.</string></property>
         </widget></item>
        </layout>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="checkBoxQueenMaryDownbeats">
+        <property name="text"><string>Mark Queen Mary downbeats (4/4 estimate)</string></property>
+        <property name="toolTip"><string>Estimate bar starts from spectral changes between beats. Assumes four beats per bar and omits ambiguous results. Accuracy depends on the detected beatgrid; this does not correct an incorrectly positioned beatgrid.</string></property>
+       </widget>
       </item>
       <item>
        <widget class="QCheckBox" name="checkBoxFastAnalysis">

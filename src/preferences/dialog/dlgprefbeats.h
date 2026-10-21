@@ -48,6 +48,8 @@ class DlgPrefBeats : public DlgPreferencePage, public Ui::DlgBeatsDlg {
     BeatDetectionSettings m_bpmSettings;
     QList<mixxx::AnalyzerPluginInfo> m_availablePlugins;
     QString m_selectedAnalyzerId;
+    QString m_customConstantId;
+    QString m_customVariableId;
     bool m_bAnalyzerEnabled;
     BeatDetectionSettings::TempoMode m_tempoMode;
     bool m_bFastAnalysisEnabled;

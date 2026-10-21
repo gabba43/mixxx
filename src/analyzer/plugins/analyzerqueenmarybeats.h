@@ -9,6 +9,7 @@
 #include "track/beatgridmode.h"
 
 class DetectionFunction;
+class DownBeat;
 
 namespace mixxx {
 
@@ -25,7 +26,7 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     }
 
     explicit AnalyzerQueenMaryBeats(bool fixedTempo = true);
-    explicit AnalyzerQueenMaryBeats(BeatGridMode mode);
+    explicit AnalyzerQueenMaryBeats(BeatGridMode mode, bool downbeats = false);
     ~AnalyzerQueenMaryBeats() override;
 
     AnalyzerPluginInfo info() const override {
@@ -43,9 +44,18 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     QVector<mixxx::audio::FramePos> getBeats() const override {
         return m_resultBeats;
     }
+    QVector<mixxx::audio::FramePos> getDownbeats() const override {
+        return m_resultDownbeats;
+    }
 
   private:
+    void findDownbeats();
     const BeatGridMode m_tempoMode;
+    const bool m_downbeatsEnabled;
+    std::unique_ptr<DownBeat> m_pDownbeat;
+    std::vector<float> m_downbeatInput;
+    size_t m_downbeatInputSize = 0;
+    SINT m_inputFrames = 0;
     std::unique_ptr<DetectionFunction> m_pDetectionFunction;
     std::unique_ptr<DetectionFunction> m_pPulseDetectionFunction;
     DownmixAndOverlapHelper m_helper;
@@ -56,6 +66,7 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     std::vector<double> m_pulseDetectionResults;
     std::vector<double> m_lowBandWindow;
     QVector<mixxx::audio::FramePos> m_resultBeats;
+    QVector<mixxx::audio::FramePos> m_resultDownbeats;
 };
 
 } // namespace mixxx

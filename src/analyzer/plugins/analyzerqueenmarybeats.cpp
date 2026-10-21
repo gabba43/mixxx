@@ -1,7 +1,11 @@
 #include <dsp/onsets/DetectionFunction.h>
+#include <dsp/tempotracking/DownBeat.h>
 #include <dsp/tempotracking/TempoTrackV2.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <functional>
 
 // Class header comes after library includes here since our preprocessor
 // definitions interfere with qm-dsp's headers.
@@ -46,8 +50,9 @@ AnalyzerQueenMaryBeats::AnalyzerQueenMaryBeats(bool fixedTempo)
                                             : BeatGridMode::Variable) {
 }
 
-AnalyzerQueenMaryBeats::AnalyzerQueenMaryBeats(BeatGridMode mode)
+AnalyzerQueenMaryBeats::AnalyzerQueenMaryBeats(BeatGridMode mode, bool downbeats)
         : m_tempoMode(mode),
+          m_downbeatsEnabled(downbeats),
           m_windowSize(0),
           m_stepSizeFrames(0) {
 }
@@ -61,10 +66,19 @@ bool AnalyzerQueenMaryBeats::initialize(mixxx::audio::SampleRate sampleRate) {
     m_resultBeats.clear();
     m_pulseDetectionResults.clear();
     m_pPulseDetectionFunction.reset();
+    m_pDownbeat.reset();
+    m_resultDownbeats.clear();
+    m_downbeatInputSize = 0;
+    m_inputFrames = 0;
     if (!sampleRate.isValid()) {
         return false;
     }
     m_sampleRate = sampleRate;
+    if (m_downbeatsEnabled) {
+        m_downbeatInput.assign(1024, 0.0f);
+        m_pDownbeat = std::make_unique<DownBeat>(sampleRate, 16, m_downbeatInput.size());
+        m_pDownbeat->setBeatsPerBar(4);
+    }
     m_stepSizeFrames = static_cast<int>(m_sampleRate * kStepSecs);
     m_windowSize = MathUtilities::nextPowerOfTwo(m_sampleRate / kMaximumBinSizeHz);
     m_pDetectionFunction = std::make_unique<DetectionFunction>(
@@ -109,6 +123,17 @@ bool AnalyzerQueenMaryBeats::processSamples(const CSAMPLE* pIn, SINT iLen) {
     DEBUG_ASSERT(iLen % kAnalysisChannels == 0);
     if (!m_pDetectionFunction) {
         return false;
+    }
+
+    if (m_pDownbeat) {
+        for (SINT sample = 0; sample < iLen; sample += kAnalysisChannels) {
+            m_downbeatInput[m_downbeatInputSize++] = (pIn[sample] + pIn[sample + 1]) * 0.5f;
+            ++m_inputFrames;
+            if (m_downbeatInputSize == m_downbeatInput.size()) {
+                m_pDownbeat->pushAudioBlock(m_downbeatInput.data());
+                m_downbeatInputSize = 0;
+            }
+        }
     }
 
     return m_helper.processStereoSamples(pIn, iLen);
@@ -171,9 +196,66 @@ bool AnalyzerQueenMaryBeats::finalize() {
                 m_resultBeats, pulseOnsets, m_sampleRate, m_stepSizeFrames);
     }
 
+    findDownbeats();
+
     m_pDetectionFunction.reset();
     m_pPulseDetectionFunction.reset();
     return true;
+}
+
+void AnalyzerQueenMaryBeats::findDownbeats() {
+    if (!m_pDownbeat || m_resultBeats.size() < 16) {
+        return;
+    }
+    if (m_downbeatInputSize) {
+        std::fill(m_downbeatInput.begin() + m_downbeatInputSize,
+                m_downbeatInput.end(),
+                0.0f);
+        m_pDownbeat->pushAudioBlock(m_downbeatInput.data());
+    }
+    std::vector<double> beats;
+    std::vector<int> originalIndices;
+    for (int i = 0; i < m_resultBeats.size(); ++i) {
+        const double frame = m_resultBeats[i].value();
+        if (frame >= 0 && frame < m_inputFrames) {
+            beats.push_back(frame / m_downbeatInput.size());
+            originalIndices.push_back(i);
+        }
+    }
+    if (beats.size() < 16) {
+        return;
+    }
+    size_t length = 0;
+    const auto* audio = m_pDownbeat->getBufferedAudio(length);
+    std::vector<int> downbeats;
+    m_pDownbeat->findDownBeats(audio, length, beats, downbeats);
+    std::vector<double> differences;
+    m_pDownbeat->getBeatSD(differences);
+    std::array<double, 4> means{};
+    std::array<int, 4> counts{};
+    for (size_t i = 0; i < differences.size(); ++i) {
+        if (!std::isfinite(differences[i])) {
+            return;
+        }
+        const auto phase = (i + 1) % 4;
+        means[phase] += differences[i];
+        ++counts[phase];
+    }
+    for (size_t phase = 0; phase < means.size(); ++phase) {
+        if (counts[phase] < 3) {
+            return;
+        }
+        means[phase] /= counts[phase];
+    }
+    std::sort(means.begin(), means.end(), std::greater<double>());
+    if (means[0] <= 1e-6 || means[0] - means[1] < means[0] * 0.1) {
+        return;
+    }
+    for (const int index : downbeats) {
+        if (index >= 0 && static_cast<size_t>(index) < originalIndices.size()) {
+            m_resultDownbeats.push_back(m_resultBeats[originalIndices[index]]);
+        }
+    }
 }
 
 } // namespace mixxx

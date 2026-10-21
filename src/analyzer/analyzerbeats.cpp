@@ -8,6 +8,7 @@
 #include "analyzer/analyzertrack.h"
 #include "analyzer/constants.h"
 #include "analyzer/plugins/analyzerbeatthis.h"
+#include "analyzer/plugins/analyzercustombeats.h"
 #include "analyzer/plugins/analyzerqueenmarybeats.h"
 #include "analyzer/plugins/analyzersoundtouchbeats.h"
 #include "library/rekordbox/rekordboxconstants.h"
@@ -21,6 +22,7 @@ QList<mixxx::AnalyzerPluginInfo> AnalyzerBeats::availablePlugins() {
     plugins.append(mixxx::AnalyzerQueenMaryBeats::pluginInfo());
     plugins.append(mixxx::AnalyzerSoundTouchBeats::pluginInfo());
     plugins.append(mixxx::AnalyzerBeatThis::pluginInfo());
+    plugins.append(mixxx::AnalyzerCustomBeats::pluginInfo());
     return plugins;
 }
 
@@ -86,6 +88,44 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
         }
     }
 
+    const auto customChoice = [](const QString& configured, bool constant) {
+        if (configured == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id() ||
+                configured == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
+            return configured;
+        }
+        return constant ? mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()
+                        : mixxx::AnalyzerBeatThis::pluginInfo().id();
+    };
+    const auto constantId = customChoice(m_bpmSettings.getCustomConstantPlugin(), true);
+    const auto variableId = customChoice(m_bpmSettings.getCustomVariablePlugin(), false);
+    m_extraVersionInfo = getExtraVersionInfo(m_pluginId,
+            m_bPreferencesFastAnalysis,
+            m_modelSha256,
+            m_tempoMode);
+    const auto addQueenMaryVersion = [this](const QString& id, QHash<QString, QString>* version) {
+        if (id == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id() &&
+                m_bpmSettings.getQueenMaryDownbeats()) {
+            version->insert("qm_downbeats", "4/4:1");
+        }
+    };
+    addQueenMaryVersion(m_pluginId, &m_extraVersionInfo);
+    if (m_pluginId == mixxx::AnalyzerCustomBeats::pluginInfo().id()) {
+        m_extraVersionInfo.insert("custom_backend", "1");
+        for (const bool constant : {true, false}) {
+            if ((constant && m_tempoMode == mixxx::BeatGridMode::Variable) ||
+                    (!constant && m_tempoMode == mixxx::BeatGridMode::Constant)) {
+                continue;
+            }
+            const auto id = constant ? constantId : variableId;
+            auto version = getExtraVersionInfo(id, false, m_modelSha256, constant ? mixxx::BeatGridMode::Constant : mixxx::BeatGridMode::Variable);
+            addQueenMaryVersion(id, &version);
+            const QString prefix = constant ? "constant_" : "variable_";
+            for (auto it = version.cbegin(); it != version.cend(); ++it) {
+                m_extraVersionInfo.insert(prefix + it.key(), it.value());
+            }
+        }
+    }
+
     qDebug() << "AnalyzerBeats preference settings:"
              << "\nPlugin:" << m_pluginId
              << "\nFixed tempo assumption:" << m_bPreferencesFixedTempo
@@ -110,23 +150,20 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
 
     DEBUG_ASSERT(!m_pPlugin);
     if (bShouldAnalyze) {
-        if (m_pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
-            m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>(
-                    m_tempoMode);
-        } else if (m_pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
-            m_pPlugin = std::make_unique<mixxx::AnalyzerBeatThis>(
-                    mixxx::AnalyzerBeatThis::Options{
-                            m_bpmSettings.getBeatThisPython(),
-                            m_resourcePath + "analysis/beat_this_worker.py",
-                            m_bpmSettings.getBeatThisModel(),
-                            m_modelSha256});
-        } else if (m_pluginId ==
-                mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
-            m_pPlugin = std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
+        if (m_pluginId == mixxx::AnalyzerCustomBeats::pluginInfo().id()) {
+            if (m_tempoMode == mixxx::BeatGridMode::Auto && constantId == variableId) {
+                m_pPlugin = makePlugin(constantId, m_tempoMode);
+            } else {
+                m_pPlugin = std::make_unique<mixxx::AnalyzerCustomBeats>(m_tempoMode,
+                        m_tempoMode != mixxx::BeatGridMode::Variable
+                                ? makePlugin(constantId, mixxx::BeatGridMode::Constant)
+                                : nullptr,
+                        m_tempoMode != mixxx::BeatGridMode::Constant
+                                ? makePlugin(variableId, mixxx::BeatGridMode::Variable)
+                                : nullptr);
+            }
         } else {
-            // This must not happen, because we have already verified above
-            // that the PlugInId is valid
-            DEBUG_ASSERT(false);
+            m_pPlugin = makePlugin(m_pluginId, m_tempoMode);
         }
 
         if (m_pPlugin) {
@@ -144,16 +181,30 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
     return bShouldAnalyze;
 }
 
+std::unique_ptr<mixxx::AnalyzerBeatsPlugin> AnalyzerBeats::makePlugin(
+        const QString& id, mixxx::BeatGridMode mode) const {
+    if (id == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
+        return std::make_unique<mixxx::AnalyzerQueenMaryBeats>(
+                mode, m_bpmSettings.getQueenMaryDownbeats());
+    }
+    if (id == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
+        return std::make_unique<mixxx::AnalyzerBeatThis>(
+                mixxx::AnalyzerBeatThis::Options{m_bpmSettings.getBeatThisPython(),
+                        m_resourcePath + "analysis/beat_this_worker.py",
+                        m_bpmSettings.getBeatThisModel(),
+                        m_modelSha256});
+    }
+    if (id == mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
+        return std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
+    }
+    return nullptr;
+}
+
 bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
     bool bpmLock = pTrack->isBpmLocked();
     if (bpmLock) {
         qDebug() << "Track is BpmLocked: Beat calculation will not start";
         return false;
-    }
-
-    QString pluginID = m_bpmSettings.getBeatPluginId();
-    if (pluginID.isEmpty()) {
-        pluginID = defaultPlugin().id();
     }
 
     // If the track already has a Beats object then we need to decide whether to
@@ -188,17 +239,16 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
     }
 
     QString version = pBeats->getVersion();
-    QHash<QString, QString> extraVersionInfo = getExtraVersionInfo(
-            pluginID, m_bPreferencesFastAnalysis, m_modelSha256, m_tempoMode);
     QString newVersion = BeatFactory::getPreferredVersion(
             m_bPreferencesFixedTempo);
     if (m_tempoMode == mixxx::BeatGridMode::Auto ||
-            (m_pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id() &&
+            ((m_pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id() ||
+                     m_pluginId == mixxx::AnalyzerCustomBeats::pluginInfo().id()) &&
                     m_tempoMode == mixxx::BeatGridMode::Variable)) {
         newVersion = version;
     }
     QString newSubVersion = BeatFactory::getPreferredSubVersion(
-            extraVersionInfo);
+            m_extraVersionInfo);
 
     if (version == newVersion && subVersion == newSubVersion) {
         // If the version and settings have not changed then if the world is
@@ -273,8 +323,7 @@ void AnalyzerBeats::storeResults(TrackPointer pTrack) {
 }
 
 bool AnalyzerBeats::hasFinalizationProgress() const {
-    return m_pPlugin &&
-            m_pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id();
+    return m_pPlugin && m_pPlugin->hasFinalizationProgress();
 }
 
 void AnalyzerBeats::storeResultsWithProgress(
@@ -291,16 +340,12 @@ void AnalyzerBeats::storeResultsWithProgress(
     mixxx::BeatsPointer pBeats;
     if (m_pPlugin->supportsBeatTracking()) {
         QVector<mixxx::audio::FramePos> beats = m_pPlugin->getBeats();
-        QHash<QString, QString> extraVersionInfo =
-                getExtraVersionInfo(m_pluginId,
-                        m_bPreferencesFastAnalysis,
-                        m_modelSha256,
-                        m_tempoMode);
+        const auto* custom = dynamic_cast<const mixxx::AnalyzerCustomBeats*>(m_pPlugin.get());
         pBeats = BeatFactory::makePreferredBeats(beats,
-                extraVersionInfo,
-                m_tempoMode,
+                m_extraVersionInfo,
+                custom ? custom->resolvedTempoMode() : m_tempoMode,
                 m_sampleRate,
-                m_pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id());
+                m_pPlugin->preservesBeatPositions());
         if (pBeats && !m_pPlugin->getDownbeats().isEmpty()) {
             pBeats = pBeats->withDownbeats(m_pPlugin->getDownbeats());
         }

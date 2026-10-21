@@ -31,7 +31,8 @@ Variable-tempo analysis bypasses this constant-tempo correction entirely.
 The refiner also compares the supplied grid phase with the best supported
 phase at the same tempo. It can correct a half-beat displacement when the
 same conservative support and improvement thresholds are met. Queen Mary
-does not classify bar downbeats. In Auto mode its refinement is applied
+previously did not classify bar downbeats in Mixxx. The optional native
+downbeat integration is described below. In Auto mode its refinement is applied
 only after the unrefined result passes the constant-grid fit check below.
 
 The Queen Mary analysis subversion changes so the existing reanalysis
@@ -94,6 +95,59 @@ clear the labels because the beat interpretation has changed. This adds
 explicit downbeat markings, not automatic bar-level synchronization or meter
 editing. Old Mixxx versions can read the beat data but discard the new
 fields if they save it again.
+
+## Custom Models
+
+**Custom Models** is an additional entry beside Queen Mary, SoundTouch and
+Beat This! in the analyzer selector. It contains only two model assignments:
+**Model for Constant** and **Model for Variable**. Both offer Queen Mary and
+Beat This!, with Queen Mary/Beat This! as the initial pair. Beat This! uses
+the existing shared Python/checkpoint/SHA-256 settings. SoundTouch remains
+available as a separate legacy BPM-only provider.
+
+The existing Auto, Constant and Variable controls and the Auto grid-fit
+thresholds remain in use. Explicit Constant/Variable uses only its assigned
+analyzer. For Auto with different assignments, the Variable analyzer's
+full-track beats are evaluated with the existing Auto grid-fit check. That
+decision selects the assigned Constant or Variable analyzer, and its result
+is built as the decided grid type. The Constant analyzer is fed audio during
+decoding but is finalized only when Auto decides Constant. Both analyzers
+must initialize successfully. Failures do not silently substitute the other
+analyzer's output or replace an existing grid.
+
+When both assignments are identical, Auto runs that analyzer once and uses
+the existing Auto path. Model assignments, relevant backend versions and
+the shared model fingerprint enter the analysis cache identity. A choice
+used only by Variable does not invalidate an explicit Constant result, and
+vice versa. The existing reanalysis preference and BPM locks still apply.
+Changing assignments affects subsequent analyses; existing grids are not
+silently converted. Applying preferences saves the assignments immediately.
+The Linux installer now preserves an existing provider selection, including
+Custom Models, when refreshing Python/model paths.
+
+## Optional Queen Mary downbeats
+
+**Mark Queen Mary downbeats (4/4 estimate)** enables the `DownBeat` algorithm
+already included in the bundled QM DSP library. It needs no neural model
+or Python process. It compares spectral differences between beat segments
+and estimates the four-beat bar phase; it is not Beat This!'s classifier.
+It is disabled by default and independent of the Custom Models assignments.
+
+Audio is downmixed in contiguous 1,024-frame blocks and decimated 16 times.
+Beat positions are converted to that block coordinate system after the
+existing Queen Mary tempo/phase refinement. The implementation requires at
+least 16 in-range beats and at least three spectral comparisons per bar
+phase. Non-finite, effectively zero or ambiguous phase scores are omitted;
+the strongest mean must exceed the runner-up by at least 10%. These are
+engineering abstention thresholds, not calibrated accuracy/confidence.
+
+Accepted labels remain on detected beats, enter the existing downbeat
+storage and waveform marker paths, and follow the same editing rules as
+Beat This! labels. The assumption is fixed four beats per bar: changing
+meters, ambiguous arrangements and an already misplaced/incorrect beatgrid
+can yield absent or incorrect labels. This addition does not resolve the
+previously reported Gnosis beat-phase error. The synthetic spectral-change
+regression checks a 4/4 signal, not annotated real-song downbeat accuracy.
 
 ## Auto, Constant and Variable
 

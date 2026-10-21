@@ -70,6 +70,13 @@ class AnalyzerBeatsPlugin : public AnalyzerPlugin {
   public:
     ~AnalyzerBeatsPlugin() override = default;
 
+    virtual bool hasFinalizationProgress() const {
+        return false;
+    }
+    virtual bool preservesBeatPositions() const {
+        return false;
+    }
+
     virtual bool finalizeWithProgress(
             const AnalyzerProgressCallback& progress) {
         Q_UNUSED(progress);

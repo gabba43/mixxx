@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import urllib.error
 from unittest.mock import patch
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).with_name("install-linux.py")
 spec = importlib.util.spec_from_file_location("install_linux", SCRIPT)
@@ -122,12 +123,28 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Directory Music with spaces\n", first)
         self.assertIn(f"BeatThisPython {python}\n", first)
         self.assertIn(f"BeatThisModel {model}\n", first)
-        self.assertIn("AnalyserBeatPluginID beat-this:1\n", first)
+        self.assertIn("AnalyserBeatPluginID qm\n", first)
         installer.configure_profile(profile, python, model)
         self.assertEqual(config.read_text(), first)
         self.assertEqual(
             (profile / "mixxx.cfg.before-beat-this").read_text(), original
         )
+
+    def test_profile_update_preserves_custom_models_assignment(self):
+        profile = self.root / "profile"
+        installer.write_atomic(
+            profile / "mixxx.cfg",
+            "[Vamp]\nAnalyserBeatPluginID custom-models:1\n"
+            "[BPM]\ncustom_constant_plugin qm-tempotracker:0\n"
+            "custom_variable_plugin beat-this:1\ntempo_mode 0\n",
+        )
+        installer.configure_profile(
+            profile, self.root / "python", self.root / "model"
+        )
+        content = (profile / "mixxx.cfg").read_text()
+        self.assertIn("AnalyserBeatPluginID custom-models:1\n", content)
+        self.assertIn("custom_constant_plugin qm-tempotracker:0\n", content)
+        self.assertIn("custom_variable_plugin beat-this:1\n", content)
 
     def test_new_profile_uses_auto_and_legacy_modes_are_migrated(self):
         for legacy, expected in [(None, "0"), ("1", "1"), ("0", "2")]:
@@ -519,6 +536,82 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn(
             "-DCMAKE_BUILD_TYPE=Release", command.call_args.args[0]
         )
+
+    def test_ram_percent_prompt_and_job_limits(self):
+        gib = 1024**3
+        with patch.object(
+            installer, "memory_limits", return_value=(32 * gib, 32 * gib)
+        ), patch.object(
+            installer.os, "cpu_count", return_value=32
+        ), patch.object(
+            installer.sys.stdin, "isatty", return_value=True
+        ), patch(
+            "builtins.input", side_effect=["bad", "25%"]
+        ):
+            self.assertEqual(
+                installer.compile_budget(None, None), (8 * gib, 5)
+            )
+            self.assertEqual(
+                installer.compile_budget(50, None), (16 * gib, 10)
+            )
+            self.assertEqual(
+                installer.compile_budget(75, None), (24 * gib, 16)
+            )
+            self.assertEqual(installer.compile_budget(75, 2), (24 * gib, 2))
+        with patch.object(
+            installer, "memory_limits", return_value=(32 * gib, 2 * gib)
+        ):
+            budget, jobs = installer.compile_budget(75, None)
+        self.assertEqual(2 * gib * 4 // 5, budget)
+        self.assertEqual(1, jobs)
+
+    def test_memory_budget_observes_parent_cgroup_limits(self):
+        gib = 1024**3
+        files = {
+            "/proc/meminfo": "MemTotal: 33554432 kB\n"
+            "MemAvailable: 16777216 kB\n",
+            "/proc/self/cgroup": "0::/tenant/job\n",
+            "/sys/fs/cgroup/memory.max": "max\n",
+            "/sys/fs/cgroup/tenant/memory.max": str(8 * gib),
+            "/sys/fs/cgroup/tenant/memory.current": str(2 * gib),
+            "/sys/fs/cgroup/tenant/job/memory.max": "max\n",
+        }
+
+        def read(path, *args, **kwargs):
+            if str(path) not in files:
+                raise FileNotFoundError(str(path))
+            return files[str(path)]
+
+        with patch.object(installer.Path, "read_text", read):
+            self.assertEqual(installer.memory_limits(), (8 * gib, 6 * gib))
+
+    def test_user_scope_enforces_memory_and_unavailable_scope_falls_back(self):
+        for supported in (True, False):
+            with patch.object(
+                installer.shutil, "which", return_value="systemd-run"
+            ), patch.object(
+                installer.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0 if supported else 1),
+            ):
+                command = installer.build_command(self.root, 2 * 1024**3, 1)
+            self.assertEqual(
+                command[0], "systemd-run" if supported else "cmake"
+            )
+            self.assertEqual(
+                "--property=MemoryMax=2147483648" in command, supported
+            )
+            self.assertIn("--build", command)
+        with patch.object(
+            installer.shutil, "which", return_value="systemd-run"
+        ), patch.object(
+            installer.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired("systemd-run", 10),
+        ):
+            self.assertEqual(
+                installer.build_command(self.root, 1024, 1)[0], "cmake"
+            )
 
 
 if __name__ == "__main__":

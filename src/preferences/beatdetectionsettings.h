@@ -37,6 +37,10 @@ class BeatDetectionSettings {
 
     using TempoMode = mixxx::BeatGridMode;
 
+    DEFINE_PREFERENCE_HELPERS(CustomConstantPlugin, QString, BPM_CONFIG_KEY, "custom_constant_plugin", QStringLiteral("qm-tempotracker:0"));
+    DEFINE_PREFERENCE_HELPERS(CustomVariablePlugin, QString, BPM_CONFIG_KEY, "custom_variable_plugin", QStringLiteral("beat-this:1"));
+    DEFINE_PREFERENCE_HELPERS(QueenMaryDownbeats, bool, BPM_CONFIG_KEY, "queen_mary_downbeats", false);
+
     bool getFixedTempoAssumptionDefault() const {
         return true;
     }

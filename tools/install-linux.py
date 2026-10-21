@@ -373,7 +373,9 @@ def configure_profile(profile, interpreter, model):
             "0" if legacy is None else ("1" if legacy == "1" else "2")
         )
     bpm.setdefault("BPMDetectionEnabled", "1")
-    settings.setdefault("[Vamp]", {})["AnalyserBeatPluginID"] = "beat-this:1"
+    provider = settings.setdefault("[Vamp]", {})
+    if not provider.get("AnalyserBeatPluginID"):
+        provider["AnalyserBeatPluginID"] = "beat-this:1"
     content = "".join(
         "\n"
         + group
@@ -462,6 +464,101 @@ def choose_mode(mode):
             return "install"
 
 
+def memory_limits():
+    values = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            values[key] = int(value.split()[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    total = values.get("MemTotal", 2 * 1024**3)
+    available = values.get("MemAvailable", total)
+    try:
+        cgroup = next(
+            line.split(":", 2)[2]
+            for line in Path("/proc/self/cgroup").read_text().splitlines()
+            if line.startswith("0::")
+        )
+        root = Path("/sys/fs/cgroup")
+        current = (root / cgroup.lstrip("/")).resolve()
+        directories = [root]
+        while root in current.parents:
+            directories.append(current)
+            current = current.parent
+        for directory in directories:
+            try:
+                limit = (directory / "memory.max").read_text().strip()
+                if limit != "max":
+                    used = int((directory / "memory.current").read_text())
+                    total = min(total, int(limit))
+                    available = min(available, max(0, int(limit) - used))
+            except (OSError, ValueError):
+                continue
+    except (OSError, ValueError, StopIteration):
+        pass
+    return total, available
+
+
+def compile_budget(percent, jobs):
+    if percent is None and sys.stdin.isatty():
+        while True:
+            answer = (
+                input("RAM-Budget zum Kompilieren: 25%, 50% oder 75% [50%]: ")
+                .strip()
+                .rstrip("%")
+                or "50"
+            )
+            if answer in {"25", "50", "75"}:
+                percent = int(answer)
+                break
+    percent = percent or 50
+    total, available = memory_limits()
+    budget = max(1, min(total * percent // 100, available * 4 // 5))
+    parallel = max(1, budget // (1536 * 1024**2))
+    parallel = min(parallel, jobs or os.cpu_count() or 1, os.cpu_count() or 1)
+    print(
+        f"Compile RAM budget: {percent}% requested, "
+        f"{budget / 1024 ** 3:.2f} GiB available for the build; "
+        f"{parallel} parallel jobs (estimate: 1.5 GiB per job).",
+        flush=True,
+    )
+    return budget, parallel
+
+
+def build_command(build, budget, jobs):
+    command = ["cmake", "--build", build, "--parallel", jobs]
+    if shutil.which("systemd-run"):
+        prefix = [
+            "systemd-run",
+            "--user",
+            "--scope",
+            "--quiet",
+            f"--property=MemoryMax={budget}",
+            "--property=MemorySwapMax=0",
+            "--",
+        ]
+        try:
+            probe = subprocess.run(
+                prefix + ["true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            supported = probe.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            supported = False
+        if supported:
+            print("Enforcing compile RAM budget with a user systemd scope.")
+            return prefix + command
+    print(
+        "No user memory-control scope available: RAM budget controls job "
+        "parallelism only; it is not a hard memory limit.",
+        flush=True,
+    )
+    return command
+
+
 def main(argv=None):
     home = Path.home()
     data_home = absolute(
@@ -513,7 +610,15 @@ def main(argv=None):
         "or XDG data directory in build mode)",
     )
     parser.add_argument(
-        "--jobs", type=int, default=min(os.cpu_count() or 1, 4)
+        "--jobs",
+        type=int,
+        help="Maximum parallel compile jobs within the RAM budget",
+    )
+    parser.add_argument(
+        "--ram-percent",
+        type=int,
+        choices=(25, 50, 75),
+        help="Compile RAM budget; asked interactively, otherwise 50 percent",
     )
     parser.add_argument("--repository", default=REPOSITORY)
     parser.add_argument(
@@ -558,8 +663,13 @@ def main(argv=None):
         parser.error(
             "Pinned PyTorch wheels require glibc Linux on x86_64 or aarch64"
         )
-    if args.jobs < 1:
+    if args.jobs is not None and args.jobs < 1:
         parser.error("--jobs must be at least 1")
+    budget, jobs = (
+        (0, 0)
+        if args.skip_build
+        else compile_budget(args.ram_percent, args.jobs)
+    )
     build_tools = (
         ("cmake", "pkg-config")
         if not args.skip_build
@@ -631,7 +741,7 @@ def main(argv=None):
         ) from error
     if not args.skip_build:
         configure_build(source, args.build_dir, args.prefix, args.cmake_arg)
-        run(["cmake", "--build", args.build_dir, "--parallel", args.jobs])
+        run(build_command(args.build_dir, budget, jobs))
     if mode == "install":
         run(["cmake", "--install", args.build_dir, "--prefix", args.prefix])
     interpreter = install_runtime(python, source, runtime, architecture)
@@ -658,7 +768,8 @@ def main(argv=None):
         )
     print(
         f"Profile: {args.profile}\n"
-        "Beat This! is selected; a new profile uses Auto tempo mode.\n"
+        "Analysis paths set; existing analyzer/grid choices preserved.\n"
+        "A new profile uses Beat This! and Auto tempo mode.\n"
         "Sources are reused. Pull/select the desired Git revision yourself\n"
         "before rerunning this script."
     )
