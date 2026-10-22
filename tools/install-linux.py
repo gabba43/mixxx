@@ -38,6 +38,10 @@ class ModelDownloadError(ValueError):
     pass
 
 
+class SourceUpdateError(ValueError):
+    pass
+
+
 def run(command, **kwargs):
     command = [str(arg) for arg in command]
     print("+ " + shlex.join(command), flush=True)
@@ -71,7 +75,7 @@ def source_directory(explicit, destination, repository, ref):
             raise ValueError(
                 f"Not a Mixxx/Beat This! source directory: {source}"
             )
-        print(f"Using existing sources unchanged: {source}", flush=True)
+        print(f"Found existing sources: {source}", flush=True)
     else:
         source.parent.mkdir(parents=True, exist_ok=True)
         run(
@@ -91,6 +95,106 @@ def source_directory(explicit, destination, repository, ref):
                 f"The selected Git ref does not include Beat This!: {ref}"
             )
     return source
+
+
+def git_value(source, *arguments):
+    return subprocess.check_output(
+        ["git", "-C", str(source), *arguments],
+        text=True,
+        stderr=subprocess.PIPE,
+    ).strip()
+
+
+def prepare_sources(source, managed_directory, repository, ref, update=None):
+    if not (source / ".git").exists():
+        if update:
+            raise SourceUpdateError(
+                "Source archives cannot be updated with Git"
+            )
+        print(f"Source: {source} (archive, no Git revision)", flush=True)
+        return
+    managed = source.resolve() == managed_directory.resolve()
+    should_update = update if update is not None else managed
+    try:
+        branch = git_value(source, "branch", "--show-current")
+        if should_update and not branch:
+            tag = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "rev-parse",
+                    "--verify",
+                    f"refs/tags/{ref}^{{commit}}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            pinned = tag.returncode == 0 and tag.stdout.strip() == git_value(
+                source, "rev-parse", "HEAD"
+            )
+            if update is not True and pinned:
+                should_update = False
+                print(f"Using pinned tag: {ref}", flush=True)
+            else:
+                raise SourceUpdateError(
+                    "Cannot update a detached checkout. Select a branch, "
+                    "or use --no-update to build this revision explicitly."
+                )
+        if should_update:
+            if git_value(
+                source, "status", "--porcelain", "--untracked-files=no"
+            ):
+                raise SourceUpdateError(
+                    f"Local changes in {source}; commit/stash them first, "
+                    "or use --no-update to build the local changes."
+                )
+            if managed:
+                origin = git_value(source, "remote", "get-url", "origin")
+                if branch != ref or origin.rstrip("/") != repository.rstrip(
+                    "/"
+                ):
+                    raise SourceUpdateError(
+                        f"Managed checkout is {origin}, branch {branch}; "
+                        f"expected {repository}, branch {ref}. "
+                        "Use --no-update to keep that checkout explicitly."
+                    )
+            upstream = git_value(
+                source,
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            )
+            if managed and upstream != f"origin/{branch}":
+                raise SourceUpdateError(
+                    f"Unexpected managed upstream: {upstream}"
+                )
+            print(
+                f"Updating sources by fast-forward from {upstream}", flush=True
+            )
+            run(["git", "-C", source, "pull", "--ff-only", "--no-rebase"])
+        revision = git_value(source, "rev-parse", "HEAD")
+        dirty = bool(
+            git_value(source, "status", "--porcelain", "--untracked-files=no")
+        )
+    except subprocess.CalledProcessError as error:
+        raise SourceUpdateError(
+            f"Git source check/update failed in {source}. "
+            "No build was started. Resolve the Git error, or choose "
+            "--no-update explicitly to use the existing source revision."
+        ) from error
+    print(
+        f"Source directory: {source}\n"
+        f"Source branch: {branch or '(detached)'}\n"
+        f"Source commit: {revision}" + (" (local changes)" if dirty else ""),
+        flush=True,
+    )
+    if not should_update:
+        print(
+            "Sources were not updated (--update requests a fast-forward).",
+            flush=True,
+        )
 
 
 def dependency_help():
@@ -621,10 +725,24 @@ def main(argv=None):
         help="Compile RAM budget; asked interactively, otherwise 50 percent",
     )
     parser.add_argument("--repository", default=REPOSITORY)
+    updates = parser.add_mutually_exclusive_group()
+    updates.add_argument(
+        "--update",
+        dest="update",
+        action="store_true",
+        help="Fast-forward an existing checkout from its configured upstream",
+    )
+    updates.add_argument(
+        "--no-update",
+        dest="update",
+        action="store_false",
+        help="Build existing sources without fetching updates",
+    )
+    parser.set_defaults(update=None)
     parser.add_argument(
         "--ref",
         default=REF,
-        help="Branch/tag for NEW clones; existing sources remain unchanged",
+        help="Branch/tag for clones and managed checkout updates",
     )
     parser.add_argument(
         "--model-file",
@@ -652,6 +770,9 @@ def main(argv=None):
     if args.print_deps:
         dependency_help()
         return
+    if args.skip_build and args.update:
+        parser.error("--update cannot be combined with --skip-build")
+    print(f"Installer: {Path(__file__).resolve()}", flush=True)
     mode = choose_mode(args.mode)
     if sys.platform != "linux" or os.geteuid() == 0:
         parser.error("Run this installer as a regular user on Linux")
@@ -684,6 +805,13 @@ def main(argv=None):
         data_home / "mixxx-beat-this/source",
         args.repository,
         args.ref,
+    )
+    prepare_sources(
+        source,
+        data_home / "mixxx-beat-this/source",
+        args.repository,
+        args.ref,
+        False if args.skip_build else args.update,
     )
     runtime = args.runtime_dir or (
         args.prefix
@@ -770,15 +898,15 @@ def main(argv=None):
         f"Profile: {args.profile}\n"
         "Analysis paths set; existing analyzer/grid choices preserved.\n"
         "A new profile uses Beat This! and Auto tempo mode.\n"
-        "Sources are reused. Pull/select the desired Git revision yourself\n"
-        "before rerunning this script."
+        "The managed source checkout is updated on normal runs.\n"
+        "Developer checkouts require --update; --skip-build keeps sources."
     )
 
 
 if __name__ == "__main__":
     try:
         main()
-    except ModelDownloadError as error:
+    except (ModelDownloadError, SourceUpdateError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:

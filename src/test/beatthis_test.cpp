@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPixmap>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <algorithm>
@@ -522,6 +523,27 @@ TEST(BeatThisGridModeTest, AutoRetainsSustainedTempoChangesAndManualOverride) {
 }
 
 class BeatThisPreferencesTest : public MixxxTest {};
+
+TEST_F(BeatThisPreferencesTest, EmptyProviderShowsAllChoicesAndQueenMaryOptions) {
+    BeatDetectionSettings settings(config());
+    settings.setBeatPluginId(QString());
+    DlgPrefBeats dialog(nullptr, config());
+    EXPECT_EQ("qm-tempotracker:0", dialog.comboBoxBeatPlugin->currentData().toString());
+    EXPECT_GE(dialog.comboBoxBeatPlugin->findData("custom-models:1"), 0);
+    EXPECT_FALSE(dialog.checkBoxQueenMaryDownbeats->isHidden());
+    const auto screenshots = qEnvironmentVariable("MIXXX_TEST_PREFERENCES_SCREENSHOTS");
+    if (!screenshots.isEmpty()) {
+        ASSERT_TRUE(QDir().mkpath(screenshots));
+        dialog.resize(1000, 760);
+        dialog.show();
+        QCoreApplication::processEvents();
+        EXPECT_TRUE(dialog.grab().save(screenshots + "/queen-mary.png"));
+        dialog.comboBoxBeatPlugin->setCurrentIndex(dialog.comboBoxBeatPlugin->findData("custom-models:1"));
+        QCoreApplication::processEvents();
+        EXPECT_FALSE(dialog.groupBoxCustomAnalysis->isHidden());
+        EXPECT_TRUE(dialog.grab().save(screenshots + "/custom-models.png"));
+    }
+}
 
 TEST_F(BeatThisPreferencesTest, CustomConstantDoesNotRequireVariableModelAndCacheIgnoresUnusedChoice) {
     BeatDetectionSettings settings(config());

@@ -195,6 +195,10 @@ void DlgPrefBeats::slotUpdate() {
 }
 
 void DlgPrefBeats::updateGui() {
+    if (!m_availablePlugins.isEmpty() &&
+            comboBoxBeatPlugin->findData(m_selectedAnalyzerId) < 0) {
+        m_selectedAnalyzerId = m_availablePlugins.front().id();
+    }
     const QSignalBlocker pluginBlocker(comboBoxBeatPlugin);
     const QSignalBlocker customConstantBlocker(comboBoxCustomConstant);
     const QSignalBlocker customVariableBlocker(comboBoxCustomVariable);

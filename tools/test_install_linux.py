@@ -41,6 +41,134 @@ class InstallerTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
 
+    def commit(self, path, message):
+        self.git(path, "add", ".")
+        self.git(
+            path,
+            "-c",
+            "user.name=Installer Test",
+            "-c",
+            "user.email=installer@example.invalid",
+            "commit",
+            "-m",
+            message,
+        )
+        return self.git(path, "rev-parse", "HEAD")
+
+    def update_fixture(self):
+        upstream = self.sources(self.root / "upstream")
+        self.git(upstream, "init", "-b", "fixture")
+        initial = self.commit(upstream, "original sources")
+        checkout = self.root / "managed source"
+        self.git(self.root, "clone", str(upstream), str(checkout))
+        (upstream / "CMakeLists.txt").write_text("updated sources\n")
+        latest = self.commit(upstream, "new sources")
+        return upstream, checkout, initial, latest
+
+    def test_managed_checkout_fast_forwards_and_reports_revision(self):
+        upstream, checkout, initial, latest = self.update_fixture()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            installer.prepare_sources(
+                checkout, checkout, str(upstream), "fixture"
+            )
+        self.assertNotEqual(initial, latest)
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), latest)
+        self.assertIn(latest, output.getvalue())
+        self.assertIn(str(checkout), output.getvalue())
+
+    def test_local_edits_abort_update_without_overwriting_them(self):
+        upstream, checkout, initial, _ = self.update_fixture()
+        edited = checkout / "CMakeLists.txt"
+        edited.write_text("my changes\n")
+        with self.assertRaisesRegex(
+            installer.SourceUpdateError, "Local changes"
+        ):
+            installer.prepare_sources(
+                checkout, checkout, str(upstream), "fixture"
+            )
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), initial)
+        self.assertEqual(edited.read_text(), "my changes\n")
+        installer.prepare_sources(
+            checkout, checkout, str(upstream), "fixture", update=False
+        )
+        self.assertEqual(edited.read_text(), "my changes\n")
+
+    def test_diverged_checkout_is_preserved_and_stops_the_build(self):
+        upstream, checkout, _, _ = self.update_fixture()
+        (checkout / "local.txt").write_text("my commit\n")
+        local = self.commit(checkout, "local work")
+        with self.assertRaises(installer.SourceUpdateError):
+            installer.prepare_sources(
+                checkout, checkout, str(upstream), "fixture"
+            )
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), local)
+        self.assertEqual((checkout / "local.txt").read_text(), "my commit\n")
+
+    def test_unexpected_managed_branch_origin_or_upstream_is_preserved(self):
+        upstream, checkout, initial, _ = self.update_fixture()
+        for repository, ref in (
+            ("unexpected", "fixture"),
+            (str(upstream), "other"),
+        ):
+            with self.subTest(repository=repository, ref=ref):
+                with self.assertRaises(installer.SourceUpdateError):
+                    installer.prepare_sources(
+                        checkout, checkout, repository, ref
+                    )
+                self.assertEqual(
+                    self.git(checkout, "rev-parse", "HEAD"), initial
+                )
+        self.git(checkout, "branch", "--unset-upstream")
+        with self.assertRaises(installer.SourceUpdateError):
+            installer.prepare_sources(
+                checkout, checkout, str(upstream), "fixture"
+            )
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), initial)
+
+    def test_developer_checkout_requires_explicit_update(self):
+        upstream, checkout, initial, latest = self.update_fixture()
+        managed = self.root / "different managed path"
+        installer.prepare_sources(checkout, managed, str(upstream), "fixture")
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), initial)
+        installer.prepare_sources(
+            checkout, managed, str(upstream), "fixture", update=True
+        )
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), latest)
+
+    def test_no_update_keeps_old_managed_revision(self):
+        upstream, checkout, initial, _ = self.update_fixture()
+        installer.prepare_sources(
+            checkout, checkout, str(upstream), "fixture", update=False
+        )
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), initial)
+
+    def test_pinned_tag_is_kept_but_explicit_detached_update_fails(self):
+        upstream, checkout, initial, _ = self.update_fixture()
+        self.git(checkout, "tag", "pinned", initial)
+        self.git(checkout, "checkout", "pinned")
+        installer.prepare_sources(checkout, checkout, str(upstream), "pinned")
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), initial)
+        for ref, update in (("fixture", None), ("pinned", True)):
+            with self.assertRaises(installer.SourceUpdateError):
+                installer.prepare_sources(
+                    checkout, checkout, str(upstream), ref, update=update
+                )
+
+    def test_archive_needs_no_git_and_cannot_be_updated(self):
+        archive = self.sources(self.root / "archive")
+        installer.prepare_sources(archive, archive, "unused", "fixture")
+        with self.assertRaises(installer.SourceUpdateError):
+            installer.prepare_sources(
+                archive, archive, "unused", "fixture", update=True
+            )
+
+    def test_skip_build_cannot_update_sources(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                installer.main(["--skip-build", "--update"])
+        self.assertEqual(caught.exception.code, 2)
+
     def test_standalone_clones_local_git_and_preserves_existing_work(self):
         upstream = self.sources(self.root / "upstream")
         self.git(upstream, "init", "-b", "fixture")

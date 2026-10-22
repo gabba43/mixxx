@@ -46,12 +46,25 @@ python3 install-linux.py
 Review the downloaded script before executing it. The default repository
 is `https://github.com/gabba43/mixxx.git`, branch
 `feat/beat-this-variable-tempo`. Use `--repository` and `--ref` to select a
-different repository and branch/tag for a **new** clone. The selected ref
-must contain the Beat This! integration.
+different repository and branch/tag for a new clone. For an existing
+managed clone, these options must match its repository and branch; the
+script does not switch branches. The selected ref must contain Beat This!.
 
-Existing sources are used unchanged, including local edits. The script
-does not reset, pull, switch branches or overwrite an unrelated directory.
-It recognizes source archives too; Git is needed only when cloning.
+On normal runs, the managed source checkout at
+`~/.local/share/mixxx-beat-this/source` is updated from its upstream with
+`git pull --ff-only --no-rebase` before building. This also applies when
+running the script inside that checkout. The installer prints its own
+location and the source directory, branch and full commit ID, so a newly
+downloaded script cannot silently compile an outdated cached checkout.
+Tracked local changes, a mismatched repository/branch, missing upstream,
+diverged history or a failed update stop setup before compilation. No
+reset, stash or branch switch is performed. Use `--no-update` to explicitly
+build the existing revision or local edits instead. A clone of a tag stays
+pinned to that tag.
+
+Developer checkouts outside the managed path are used unchanged by default.
+Use `--update` to request a fast-forward from their configured upstream.
+Source archives are supported without Git and cannot use `--update`.
 `--source-dir /path/to/mixxx` selects existing sources explicitly or clones
 into that path if it does not exist.
 
@@ -176,10 +189,11 @@ python3 tools/install-linux.py --mode build --ram-percent 50 --jobs 4
 ```
 
 Close Mixxx using this profile before rerunning the script. Python packages
-and verified models are reused, and the native build is incremental. Before
-updating, select/pull the desired source revision yourself. Changing
-`--ref` does not modify an existing checkout. When moving installations,
-rerun with the new paths to create a new venv and refresh the profile/starter.
+and verified models are reused, and the native build is incremental. The
+managed source checkout updates automatically; for a developer checkout,
+pull the desired revision yourself or pass `--update`. When moving
+installations, rerun with the new paths to create a new venv and refresh
+the profile/starter.
 Remove the old starter symlink before changing prefixes: the script refuses
 to replace a starter pointing elsewhere. Python venvs are not relocatable.
 Existing profile settings are retained;
@@ -228,6 +242,7 @@ python3 "$HOME/.local/share/mixxx-beat-this/source/tools/install-linux.py" \
 Replace the model path with your local file. `--skip-build` skips CMake
 configuration and compilation and verifies that the build directory contains
 an executable and a CMake cache referring to the selected source directory.
+It also skips source updates; combining it with `--update` is rejected.
 Keep the same `--build-dir` and other custom paths as in the first run.
 Use this option only with the intended completed build; changes to C++
 sources still require recompilation.
