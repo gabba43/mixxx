@@ -1,5 +1,6 @@
 #include "analyzer/analyzerbeats.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QString>
 #include <QVector>
@@ -50,6 +51,9 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
         mixxx::audio::SampleRate sampleRate,
         mixxx::audio::ChannelCount channelCount,
         SINT frameLength) {
+    m_timings = {};
+    m_diagnostics = {};
+    m_processingNs = 0;
     if (frameLength <= 0) {
         return false;
     }
@@ -194,7 +198,8 @@ std::unique_ptr<mixxx::AnalyzerBeatsPlugin> AnalyzerBeats::makePlugin(
                 mixxx::AnalyzerBeatThis::Options{m_bpmSettings.getBeatThisPython(),
                         m_resourcePath + "analysis/beat_this_worker.py",
                         m_bpmSettings.getBeatThisModel(),
-                        m_modelSha256});
+                        m_modelSha256,
+                        qEnvironmentVariableIntValue("MIXXX_BEAT_THIS_ONESHOT") != 1});
     }
     if (id == mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
         return std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
@@ -269,6 +274,8 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
 }
 
 bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
+    QElapsedTimer processing;
+    processing.start();
     VERIFY_OR_DEBUG_ASSERT(m_pPlugin) {
         return false;
     }
@@ -318,6 +325,7 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
     if (pDrumChannel) {
         SampleUtil::free(pDrumChannel);
     }
+    m_processingNs += processing.nsecsElapsed();
     return ret;
 }
 
@@ -339,9 +347,12 @@ void AnalyzerBeats::storeResultsWithProgress(
         return;
     }
 
+    QElapsedTimer phase;
+    phase.start();
     if (m_tempoMode != mixxx::BeatGridMode::Variable) {
         m_audioEvidence.prepare();
     }
+    const double evidencePrepareMs = phase.nsecsElapsed() / 1e6;
     const auto pluginProgress = [&progress, this](double value) {
         if (progress) {
             progress(value * (m_audioEvidence.hasEvidence() ? 0.85 : 1.0));
@@ -352,6 +363,11 @@ void AnalyzerBeats::storeResultsWithProgress(
         return;
     }
 
+    m_timings = m_pPlugin->timingMetrics();
+    m_diagnostics = m_pPlugin->analysisDiagnostics();
+    m_timings.insert("evidence_prepare", evidencePrepareMs);
+    m_timings.insert("stream_processing", m_processingNs / 1e6);
+    phase.restart();
     mixxx::BeatsPointer pBeats;
     if (m_pPlugin->supportsBeatTracking()) {
         QVector<mixxx::audio::FramePos> beats = m_pPlugin->getBeats();
@@ -408,11 +424,18 @@ void AnalyzerBeats::storeResultsWithProgress(
         pBeats = mixxx::Beats::fromConstTempo(m_sampleRate, mixxx::audio::kStartFramePos, bpm);
     }
 
+    m_timings.insert("grid_refinement",
+            m_timings.value("grid_refinement").toDouble() +
+                    phase.nsecsElapsed() / 1e6);
+    phase.restart();
     if (pBeats) {
         pTrack->trySetBeats(pBeats);
     } else {
         qWarning() << "Beat/BPM analysis produced no usable grid";
     }
+    m_timings.insert("storage", phase.nsecsElapsed() / 1e6);
+    m_diagnostics.insert("storage_scope", "in_memory_track_attachment");
+    qDebug() << "Beat analysis stages (ms):" << m_timings;
     if (progress) {
         progress(1.0);
     }
@@ -431,7 +454,7 @@ QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
     }
     if (mode != mixxx::BeatGridMode::Variable &&
             pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
-        extraVersionInfo["audio_grid_evidence"] = "2";
+        extraVersionInfo["audio_grid_evidence"] = "3";
     }
     if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
         extraVersionInfo["beat_tracker_version"] = "3";

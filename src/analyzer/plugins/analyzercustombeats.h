@@ -33,6 +33,8 @@ class AnalyzerCustomBeats final : public AnalyzerBeatsPlugin {
     bool hasFinalizationProgress() const override;
     bool preservesBeatPositions() const override;
     bool supportsBeatTracking() const override;
+    QJsonObject timingMetrics() const override;
+    QJsonObject analysisDiagnostics() const override;
     Bpm getBpm() const override;
     QVector<audio::FramePos> getBeats() const override;
     QVector<audio::FramePos> getDownbeats() const override;
@@ -53,6 +55,7 @@ class AnalyzerCustomBeats final : public AnalyzerBeatsPlugin {
     AnalyzerBeatsPlugin* m_selected = nullptr;
     const BeatGridEvidence* m_audioEvidence;
     BeatsPointer m_preparedGrid;
+    double m_refinementMs = 0;
 };
 
 } // namespace mixxx

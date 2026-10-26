@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
 
 #include "analyzer/analyzerprogress.h"
@@ -69,6 +70,12 @@ class AnalyzerPlugin {
 class AnalyzerBeatsPlugin : public AnalyzerPlugin {
   public:
     ~AnalyzerBeatsPlugin() override = default;
+    virtual QJsonObject timingMetrics() const {
+        return {};
+    }
+    virtual QJsonObject analysisDiagnostics() const {
+        return {};
+    }
 
     virtual bool hasFinalizationProgress() const {
         return false;

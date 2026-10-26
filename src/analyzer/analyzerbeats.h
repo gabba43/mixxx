@@ -30,6 +30,12 @@ class AnalyzerBeats : public Analyzer {
     void storeResultsWithProgress(TrackPointer track,
             const AnalyzerProgressCallback& progress) override;
     void cleanup() override;
+    QJsonObject lastTimingMetrics() const {
+        return m_timings;
+    }
+    QJsonObject analysisDiagnostics() const {
+        return m_diagnostics;
+    }
 
   private:
     bool shouldAnalyze(TrackPointer pTrack) const;
@@ -44,6 +50,9 @@ class AnalyzerBeats : public Analyzer {
     const QString m_resourcePath;
     std::unique_ptr<mixxx::AnalyzerBeatsPlugin> m_pPlugin;
     mixxx::BeatGridEvidence m_audioEvidence;
+    QJsonObject m_timings;
+    QJsonObject m_diagnostics;
+    qint64 m_processingNs = 0;
     const bool m_enforceBpmDetection;
     QString m_pluginId;
     QString m_modelSha256;

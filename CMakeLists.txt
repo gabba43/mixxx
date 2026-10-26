@@ -2938,8 +2938,11 @@ if(BUILD_TESTING)
     src/test/analyzersilence_test.cpp
     src/test/audiotaperpot_test.cpp
     src/test/autodjprocessor_test.cpp
+    src/test/beatbenchmark_test.cpp
     src/test/beatgridevidence_test.cpp
+    src/test/beatphasealignment_test.cpp
     src/test/beatthis_test.cpp
+    src/test/beatthisworker_test.cpp
     src/test/beatgridtest.cpp
     src/test/beatmaptest.cpp
     src/test/beatstest.cpp

@@ -2,6 +2,12 @@
 
 # Beat analysis: tempo ambiguity and downbeats
 
+The comparison target is strict musical tempo, beat/downbeat timing, continuity,
+manual correction effort and measured throughput/RAM against independently
+checked annotations. A pinned Traktor Pro 4 build is a comparison candidate;
+perfect automatic variable grids are not assumed. See [BEAT_BENCHMARK.md](BEAT_BENCHMARK.md)
+for the versioned exporter/evaluator, decoder timelines and an untouched holdout.
+
 The existing Queen Mary tracker identifies a clean 174 BPM synthetic pulse
 as 87 BPM at 44.1, 48 and 96 kHz. This is a reproducible metrical-level
 ambiguity, including when alternate pulses are quieter. The change adds an
@@ -54,9 +60,29 @@ The integration runs the official Python inference implementation in an
 external process on the analysis worker, using CPU PyTorch and `dbn=False`.
 Audio is downmixed to mono and streamed into a temporary float32 file;
 no audio is uploaded. Mixxx does not download models or install Python
-packages during analysis. The process supports cancellation and has a
-10-minute limit per track. The analyzer commits results only after successful
+packages during analysis. One persistent process per analysis thread imports
+Python and loads the model once, then accepts sequential jobs. Startup has a
+60-second limit and each job a 10-minute limit. Cancellation kills the active
+worker; the next job can start a fresh process. The analyzer commits results only after successful
 validation; a failed run leaves any grid still present on the track untouched.
+
+The process uses protocol 2 UTF-8 JSON lines: a verified `ready` handshake, job IDs,
+progress, a nested version-1 result, and recoverable or fatal errors. Requests
+are limited to 64 KiB and responses to 8 MiB. Replies with the wrong ID, invalid
+positions, malformed progress or a protocol mismatch are rejected. Crashes,
+timeouts and fatal errors discard the session; ordinary invalid jobs can leave
+it reusable. Runtime/script/checkpoint identity changes cause a restart. The
+checkpoint is hashed before loading and its file identity is checked for every
+job. Each analysis thread owns its process, so jobs do not cross thread boundaries.
+The existing batch scheduler releases its threads after completion, and worker
+shutdown is explicit at thread exit. Reuse adds no new analysis threads.
+
+The one-shot CLI remains supported for installation checks and controlled
+comparisons. `MIXXX_BEAT_THIS_ONESHOT=1` selects it in the C++ backend; `--timings`
+adds measurements to direct CLI output. Neither mode changes the official
+prediction algorithm, the 22,050 Hz model resampling, CPU thread counts or the
+checkpoint. Real cross-rate tests compare exact one-shot and warm results at
+22,050, 48,000 and 44,100 Hz.
 
 For an interactive user-local Linux build/install, including the Python
 environment, checkpoint and automatic path configuration, see
@@ -215,8 +241,8 @@ cause a physically constant song to use a variable grid.
 
 The conservative clock-fit follow-up used `auto:2` and Beat This! backend
 identity `3`. The subsequent audio-validation pass uses `auto:3`,
-`audio_grid_evidence:2` and Custom Models backend `2`. The neural worker and
-checkpoint are unchanged. Request reanalysis of unlocked tracks to replace
+`audio_grid_evidence:3` and Custom Models backend `2`. The neural checkpoint
+and prediction algorithm are unchanged; worker transport uses protocol 2. Request reanalysis of unlocked tracks to replace
 old results; BPM locks and reanalysis preferences still apply.
 
 Fast analysis is available only in Constant mode. Auto and Variable analyze
@@ -292,6 +318,12 @@ therefore remain ambiguous. Full-band corroboration does not identify the
 intended musical meter. Explicit Variable remains available.
 
 Fine translations must improve support on both halves of the recording.
+A translation larger than 10 ms is rejected when it reduces full-band F1 by
+more than 0.02 on both halves and the original support is at least 0.2 in each.
+In that case retain the original phase, including abstaining from the small
+subframe fallback. This prevents the crest of a soft bass body from pulling
+an already aligned percussive attack later. These are engineering guards,
+not calibrated probabilities or a fixed early offset.
 A more conservative correction of at most 10 ms can compensate for the
 50 Hz model's timestamp quantization when two of the three frequency
 channels agree on both halves. Global half-beat changes require a stronger
@@ -318,11 +350,15 @@ adds work relative to the former Queen-Mary-only Variable route. Identical
 assignments still use one inference. There are no new Python requirements,
 checkpoint downloads, per-song rules or model-training steps.
 
-The current CPU worker starts a Python process and loads the model for each
-track; Torch uses two intra-operation threads and one inter-operation thread.
-Imports, model loading and the additional Auto candidate comparison contribute
-to runtime. This refinement adds onset validation and makes no throughput
-claim against Traktor, whose complete analysis implementation is proprietary.
+Torch uses two intra-operation threads and one inter-operation thread.
+Warm jobs reuse imports, checkpoint verification and the model; preprocessing
+and inference still run for every recording. Stage measurements cover decoder,
+PCM writing, startup/import/model load, preprocessing, inference, postprocessing,
+grid refinement and in-memory track attachment. The `storage` stage does not
+measure deferred library database writes. Parent/worker timings overlap and
+must not be added indiscriminately. Worker RSS is explicitly its process-lifetime
+high-water mark, not total Mixxx RAM or a per-job delta. See the benchmark guide
+for measured controls and remaining corpus/comparison limitations.
 
 The second supplied set checks these outcomes with Constant=Beat This! and
 Variable=Queen Mary:
@@ -386,6 +422,23 @@ Add `splash.f32`, `apollo.f32`, `code-red.f32` and their official
 `*-baseline.json` worker outputs to `MIXXX_TEST_PHASE_GRID_TRACK_DIRECTORY`
 to include these recordings in both the cached and complete-model tests.
 
+## Soft-bass timing regression
+
+For Eurogroove – Move Your Body Part 1, the user verified Constant 135.93 BPM
+and an approximate 40 ms advance relative to the previous grid. Native libmad
+analysis produces 135.92741 BPM. The previous audio refiner moved its already
+aligned model clock approximately 46.32 ms later toward the bass crest; the
+new full-band contradiction guard retains the original clock. The observed
+change agrees with the user correction to approximately 6 ms, without applying
+a recording-specific offset. Earlier useful Jeff Mills/Ellen Allien timing
+corrections and all previous grid-type references remain regression cases.
+
+The user's correction and independent waveform/onset diagnostics support this
+regression, but do not constitute complete manual beat/downbeat annotations.
+The benchmark leaves those quality fields unavailable. MP3 decoder-origin
+mapping is a separate issue: libmad and FFmpeg gapless decodes differ by about
+25.06 ms for this file, so a cross-decoder comparison must record its timeline.
+
 ## Conservative Auto regression recordings
 
 The six supplied recordings were decoded in full as mono float32 at 44.1 kHz.
@@ -444,7 +497,8 @@ Model inference still runs after audio decoding. Previously decoding took
 the progress display to 95%, then the entire Python/model job ran without
 updates. Beat This! jobs now reserve 0–50% for decoding and 50–95% for model
 preparation and inference; final result storage completes the job. The worker
-reports each completed model window through a separate stderr protocol.
+reports each completed model window through job-identified JSON messages in
+persistent mode and the legacy stderr protocol in one-shot mode.
 This is stage progress, not an estimate of remaining wall-clock time. The
 official preprocessing, inference and postprocessing remain in use.
 
@@ -510,11 +564,11 @@ with local `hmc.f32`, `gnosis.f32` mono float32 files at 44.1 kHz and their
 `*-baseline.json` model results. Original music files are not included in
 the repository.
 
-Final validation in this environment: the Debug build succeeded; all 1,336
+Final validation in this environment: the Debug build succeeded; all 1,351
 active CTest cases passed, including the real-model integration tests,
-the 20 complete Custom Models analyses and the supplied-track regressions.
+the 21 complete Custom Models analyses and the supplied-track regressions.
 The 38 existing disabled cases remained disabled; no active test was skipped.
-All 31 installer/worker Python tests, Black, Flake8 and formatting checks
+All 62 installer/worker/benchmark Python tests, Black, Flake8 and formatting checks
 for the changed C++ files passed.
 Mixxx also initialized its database, loaded the LateNight skin, opened
 virtual audio output and entered its event loop in the headless startup
@@ -533,8 +587,9 @@ The 120 BPM fixture produced mixed two- and four-beat downbeat intervals;
 its bar interpretation is therefore not established as correct. The 120 BPM
 run, including Python startup and model loading, took 6.66 seconds with
 approximately 510 MiB peak resident memory while a build was also running.
-This single measurement is not a throughput benchmark. Each track currently
-starts a new Python process and loads the model again.
+This historical single measurement is not a throughput benchmark. It used
+the previous per-track Python process and model-loading path; warm reuse is
+now described above and measured separately in the benchmark guide.
 
 This follow-up is developed on `feat/beat-this-variable-tempo`. The previous
 implementation remains on `feat/beat-this-analysis` at `a6db4edf42`.

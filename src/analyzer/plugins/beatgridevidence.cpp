@@ -391,17 +391,27 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
     // Rank each clock at its attainable phase, independently of the stronger
     // evidence required to actually translate an existing grid.
     double safeZeroShift = utility(candidates[0]) >= utility(original) + 0.01 ? shifts[0] : 0;
+    bool retainOriginalPhase = false;
     if (safeZeroShift != 0) {
         const double middle = duration * 0.5;
-        if (utility(measure(beats, shifts[0], guard, middle)) <
-                        utility(measure(beats, 0, guard, middle)) + 0.005 ||
-                utility(measure(beats, shifts[0], middle, duration - guard)) <
-                        utility(measure(beats, 0, middle, duration - guard)) +
-                                0.005) {
+        const auto first = measure(beats, shifts[0], guard, middle);
+        const auto firstOriginal = measure(beats, 0, guard, middle);
+        const auto second = measure(beats, shifts[0], middle, duration - guard);
+        const auto secondOriginal = measure(beats, 0, middle, duration - guard);
+        // A rounded bass body can peak after an already aligned attack.
+        // Keep the original phase when both halves independently contradict
+        // a larger bass-led translation; do not replace it with a tiny shift.
+        const auto contradicts = [](const Scores& proposed, const Scores& current) {
+            return current[3][1].f1 >= 0.2 && proposed[3][1].f1 < current[3][1].f1 - 0.02;
+        };
+        retainOriginalPhase = std::abs(safeZeroShift) > 0.010001 &&
+                contradicts(first, firstOriginal) && contradicts(second, secondOriginal);
+        if (retainOriginalPhase || utility(first) < utility(firstOriginal) + 0.005 ||
+                utility(second) < utility(secondOriginal) + 0.005) {
             safeZeroShift = 0;
         }
     }
-    if (safeZeroShift == 0) {
+    if (safeZeroShift == 0 && !retainOriginalPhase) {
         // Sub-frame corrections stay within half a 50 Hz model frame and need
         // agreement in two bands on both halves of the recording.
         const auto bodyScore = [](const Scores& scores) {

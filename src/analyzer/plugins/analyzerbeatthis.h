@@ -14,6 +14,9 @@ class AnalyzerBeatThis final : public AnalyzerBeatsPlugin {
         QString script;
         QString checkpoint;
         QString sha256;
+        bool persistent = true;
+        int requestTimeoutMs = 600000;
+        int startupTimeoutMs = 60000;
     };
 
     static AnalyzerPluginInfo pluginInfo() {
@@ -47,6 +50,13 @@ class AnalyzerBeatThis final : public AnalyzerBeatsPlugin {
     QVector<audio::FramePos> getDownbeats() const override {
         return m_downbeats;
     }
+    QJsonObject timingMetrics() const override {
+        return m_timings;
+    }
+    QJsonObject analysisDiagnostics() const override {
+        return m_diagnostics;
+    }
+    static void shutdownWorkerForCurrentThread();
 
     static bool parseResults(const QByteArray& json,
             const QString& sha256,
@@ -64,6 +74,8 @@ class AnalyzerBeatThis final : public AnalyzerBeatsPlugin {
     bool m_initialized = false;
     QVector<audio::FramePos> m_beats;
     QVector<audio::FramePos> m_downbeats;
+    QJsonObject m_timings;
+    QJsonObject m_diagnostics;
 };
 
 } // namespace mixxx

@@ -10,6 +10,7 @@
 #include "analyzer/analyzersilence.h"
 #include "analyzer/analyzerwaveform.h"
 #include "analyzer/constants.h"
+#include "analyzer/plugins/analyzerbeatthis.h"
 #include "library/dao/analysisdao.h"
 #include "moc_analyzerthread.cpp"
 #include "sources/audiosourcestereoproxy.h"
@@ -205,6 +206,7 @@ void AnalyzerThread::doRun() {
     DEBUG_ASSERT(!m_currentTrack);
     DEBUG_ASSERT(isStopping());
 
+    mixxx::AnalyzerBeatThis::shutdownWorkerForCurrentThread();
     m_analyzers.clear();
 
     kLogger.debug() << "Exiting worker thread";

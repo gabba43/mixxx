@@ -1037,6 +1037,9 @@ TEST(BeatThisRealTrackTest, PhaseAndMetricalAudioRegression) {
             EXPECT_GT(deltas[1].toDouble(), 0);
             EXPECT_LT(deltas[1].toDouble(), name == "ellen" ? 0.03 : 0.1);
         }
+        if (name == "eurogroove") {
+            EXPECT_LT(std::abs(deltas[1].toDouble()), 0.015);
+        }
         if (name == "steve" || name == "tanru") {
             const double period = 60 /
                     original->getBpmAroundPosition(
@@ -1142,6 +1145,9 @@ TEST_F(BeatThisAnalyzerTest, UploadedCustomModelsChooseConservativeGridTypes) {
         }
         if (name == "code-red") {
             EXPECT_NEAR(170.28, bpm, 0.02);
+        }
+        if (name == "eurogroove") {
+            EXPECT_NEAR(135.93, bpm, 0.02);
         }
         if (grid->hasConstantTempo()) {
             EXPECT_FALSE(grid->getDownbeats().isEmpty());
