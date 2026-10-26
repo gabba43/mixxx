@@ -431,7 +431,7 @@ QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
     }
     if (mode != mixxx::BeatGridMode::Variable &&
             pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
-        extraVersionInfo["audio_grid_evidence"] = "1";
+        extraVersionInfo["audio_grid_evidence"] = "2";
     }
     if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
         extraVersionInfo["beat_tracker_version"] = "3";

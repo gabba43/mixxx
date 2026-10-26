@@ -10,6 +10,8 @@
 namespace mixxx {
 namespace {
 
+constexpr double kPhaseDominance = 2.5;
+
 void lowpass(std::vector<double>* signal, double cutoff, double sampleRate) {
     const double omega = 2 * M_PI * cutoff / sampleRate;
     const double alpha = std::sin(omega) / std::sqrt(2.0);
@@ -49,10 +51,12 @@ void BeatGridEvidence::initialize(audio::SampleRate sampleRate) {
     m_hop = sampleRate.isValid() ? std::max(1, static_cast<int>(sampleRate / 1000)) : 0;
     m_pending = 0;
     m_sum = 0;
+    m_blockEnergy = 0;
     m_energy = 0;
     m_frames = 0;
     m_prepared = false;
     m_wave.clear();
+    m_fullBandEnergy.clear();
     for (auto& events : m_events) {
         events.clear();
     }
@@ -68,11 +72,14 @@ bool BeatGridEvidence::processSamples(const CSAMPLE* stereo, SINT count) {
             return false;
         }
         m_sum += value;
+        m_blockEnergy += value * value;
         m_energy += value * value;
         ++m_frames;
         if (++m_pending == m_hop) {
             m_wave.push_back(m_sum / m_hop);
+            m_fullBandEnergy.push_back(m_blockEnergy / m_hop);
             m_sum = 0;
+            m_blockEnergy = 0;
             m_pending = 0;
         }
     }
@@ -93,12 +100,16 @@ void BeatGridEvidence::prepare() {
     const double floor = 0.015 * std::sqrt(m_energy / m_frames);
     // Zero-phase filters avoid introducing a frequency-dependent beat delay.
     // The 150 Hz channel corroborates fine shifts; low/broad attacks rank grids.
+    // Full-band RMS retains snares and hats lost by averaging the waveform.
+    // Their stable clock can veto a syncopated kick arrangement's phase change.
     constexpr std::array<double, 3> kCutoffs{85, 150, 300};
-    for (size_t channel = 0; channel < kCutoffs.size(); ++channel) {
-        auto envelope = m_wave;
-        lowpass(&envelope, kCutoffs[channel], rate);
-        for (auto& value : envelope) {
-            value *= value;
+    for (size_t channel = 0; channel < m_events.size(); ++channel) {
+        auto envelope = channel < kCutoffs.size() ? m_wave : m_fullBandEnergy;
+        if (channel < kCutoffs.size()) {
+            lowpass(&envelope, kCutoffs[channel], rate);
+            for (auto& value : envelope) {
+                value *= value;
+            }
         }
         lowpass(&envelope, 30, rate);
         for (auto& value : envelope) {
@@ -182,8 +193,50 @@ bool BeatGridEvidence::preferConstant(
         return constant.reliable;
     }
     if (constant.reliable && variable.reliable) {
-        return std::max(variable.scores[0] - constant.scores[0],
-                       variable.scores[1] - constant.scores[1]) <= 0.08;
+        // Compare a sparse, metrically switching tracker against the same
+        // pulse opportunities. A genuinely steady half-tempo interpretation
+        // still competes at its own density, avoiding an automatic octave bias.
+        const bool normalize = variable.unstableDensity && constant.density > variable.density;
+        const double density = normalize ? constant.density : 0;
+        const auto scoresAtDensity = [density](const Result& candidate) {
+            if (!(candidate.density > 0) || !(density > 0)) {
+                return candidate.scores;
+            }
+            std::array<double, 2> scores{};
+            for (size_t scale = 0; scale < scores.size(); ++scale) {
+                for (const auto& band : candidate.support[scale]) {
+                    const double precision = band.precision * candidate.density / density;
+                    const double sum = precision + band.recall;
+                    scores[scale] += sum > 0 ? precision * band.recall / sum : 0;
+                }
+            }
+            return scores;
+        };
+        const auto constantScores = scoresAtDensity(constant);
+        const auto variableScores = scoresAtDensity(variable);
+        if (normalize) {
+            // Sparse kicks may favor a changing metrical level even after
+            // density normalization. The remaining drums must also favor it.
+            const auto fullScore = [density](const Result& candidate, size_t scale) {
+                const auto& band = candidate.fullSupport[scale];
+                const double precision = band.precision * candidate.density / density;
+                const double sum = precision + band.recall;
+                return sum > 0 ? 2 * precision * band.recall / sum : 0;
+            };
+            bool corroborated = false;
+            bool available = false;
+            for (size_t scale = 0; scale < 2; ++scale) {
+                const double c = fullScore(constant, scale);
+                const double v = fullScore(variable, scale);
+                available |= std::max(c, v) >= 0.2;
+                corroborated |= v > c;
+            }
+            if (available && !corroborated) {
+                return true;
+            }
+        }
+        return std::max(variableScores[0] - constantScores[0],
+                       variableScores[1] - constantScores[1]) <= 0.08;
     }
     return fallback;
 }
@@ -257,7 +310,8 @@ BeatGridEvidence::Scores BeatGridEvidence::measure(
             result[channel][scale] = {precision + recall > 0
                             ? 2 * precision * recall / (precision + recall)
                             : 0,
-                    precision};
+                    precision,
+                    recall};
         }
     }
     return result;
@@ -294,10 +348,20 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
         return result;
     }
     const double guard = duration > 32 ? 8 : 1;
+    result.density = (std::lower_bound(beats.begin(), beats.end(), duration - guard) -
+                             std::lower_bound(beats.begin(), beats.end(), guard)) /
+            (duration - 2 * guard);
+    std::vector<double> intervals;
+    for (size_t i = 1; i < beats.size(); ++i) {
+        intervals.push_back(beats[i] - beats[i - 1]);
+    }
+    result.unstableDensity = quantile(intervals, 0.9) > 1.25 * quantile(intervals, 0.1);
     const auto original = measure(beats, 0, guard, duration - guard);
     std::array<double, 2> shifts{};
     std::array<Scores, 2> candidates{};
     std::array<std::array<double, 2>, 2> maximumScores{};
+    std::array<std::array<std::array<PulseSupport, 2>, 2>, 2> maximumSupport{};
+    std::array<std::array<PulseSupport, 2>, 2> maximumFullSupport{};
     const double radius = std::min(0.075, period * 0.15);
     for (int state = 0; state < 2; ++state) {
         double best = -1;
@@ -305,8 +369,17 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
             const double shift = state * period * 0.5 + step * radius / 20;
             const auto scores = measure(beats, shift, guard, duration - guard);
             for (size_t scale = 0; scale < 2; ++scale) {
-                maximumScores[state][scale] = std::max(maximumScores[state][scale],
-                        (scores[0][scale].f1 + scores[2][scale].f1) * 0.5);
+                const double score = (scores[0][scale].f1 + scores[2][scale].f1) * 0.5;
+                if (score > maximumScores[state][scale]) {
+                    maximumScores[state][scale] = score;
+                    maximumFullSupport[state][scale] = {
+                            scores[3][scale].precision,
+                            scores[3][scale].recall};
+                    for (size_t band = 0; band < 2; ++band) {
+                        const auto& evidence = scores[band * 2][scale];
+                        maximumSupport[state][scale][band] = {evidence.precision, evidence.recall};
+                    }
+                }
             }
             if (utility(scores) > best) {
                 best = utility(scores);
@@ -358,12 +431,21 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
             }
         }
     }
-    const bool halfSupported = utility(candidates[1]) > utility(candidates[0]) + 0.08 &&
+    const bool halfSupported =
+            utility(candidates[1]) > utility(candidates[0]) + 0.08 &&
             candidates[1][0][1].f1 > candidates[0][0][1].f1 + 0.04 &&
-            candidates[1][2][1].f1 > candidates[0][2][1].f1 + 0.04;
+            candidates[1][2][1].f1 > candidates[0][2][1].f1 + 0.04 &&
+            candidates[1][3][1].f1 >
+                    std::max(original[3][1].f1, candidates[0][3][1].f1) +
+                            0.04 &&
+            candidates[1][3][1].precision > kPhaseDominance *
+                            std::max(original[3][1].precision,
+                                    candidates[0][3][1].precision);
     const int globalState = halfSupported ? 1 : 0;
     for (size_t scale = 0; scale < result.scores.size(); ++scale) {
         result.scores[scale] = maximumScores[globalState][scale];
+        result.support[scale] = maximumSupport[globalState][scale];
+        result.fullSupport[scale] = maximumFullSupport[globalState][scale];
     }
     result.reliable = *std::max_element(result.scores.begin(), result.scores.end()) >= 0.2;
     if (!result.reliable) {
@@ -380,14 +462,23 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
         for (int i = 0; i < windows; ++i) {
             const auto same = measure(beats, shifts[0], i * 16, std::min(duration, (i + 1) * 16.0));
             const auto half = measure(beats, shifts[1], i * 16, std::min(duration, (i + 1) * 16.0));
+            const auto unchanged = measure(beats, 0, i * 16, std::min(duration, (i + 1) * 16.0));
             const double low = (half[0][0].f1 + half[0][1].f1 - same[0][0].f1 -
                                        same[0][1].f1) *
                     0.5;
             const double mid = (half[2][0].f1 + half[2][1].f1 - same[2][0].f1 -
                                        same[2][1].f1) *
                     0.5;
+            const double full = half[3][1].f1 - std::max(same[3][1].f1, unchanged[3][1].f1);
+            // A stronger offbeat kick alone may win F1 while snares still
+            // support the old clock. Demand 2.5 times the full-band pulse support
+            // before abandoning that phase; otherwise the window is ambiguous.
+            const double samePrecision = std::max(same[3][1].precision, unchanged[3][1].precision);
+            const bool halfDominates = half[3][1].precision > kPhaseDominance * samePrecision;
+            const bool sameDominates = samePrecision > kPhaseDominance * half[3][1].precision;
             const double evidence =
-                    ((low > 0.03 && mid > 0.03) || (low < -0.03 && mid < -0.03))
+                    ((low > 0.03 && mid > 0.03 && full > 0.03 && halfDominates) ||
+                            (low < -0.03 && mid < -0.03 && full < -0.03 && sameDominates))
                     ? (low + mid) * 0.5
                     : 0;
             evidenceByWindow[i] = evidence;
@@ -561,8 +652,16 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
         }
         const auto corrected = measure(times, 0, guard, duration - guard);
         for (size_t scale = 0; scale < result.scores.size(); ++scale) {
-            result.scores[scale] = std::max(result.scores[scale],
-                    (corrected[0][scale].f1 + corrected[2][scale].f1) * 0.5);
+            const double score = (corrected[0][scale].f1 + corrected[2][scale].f1) * 0.5;
+            if (score > result.scores[scale]) {
+                result.scores[scale] = score;
+                result.fullSupport[scale] = {corrected[3][scale].precision,
+                        corrected[3][scale].recall};
+                for (size_t band = 0; band < 2; ++band) {
+                    const auto& evidence = corrected[band * 2][scale];
+                    result.support[scale][band] = {evidence.precision, evidence.recall};
+                }
+            }
         }
     }
     return result;

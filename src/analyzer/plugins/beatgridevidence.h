@@ -11,9 +11,17 @@ namespace mixxx {
 
 class BeatGridEvidence {
   public:
+    struct PulseSupport {
+        double precision = 0;
+        double recall = 0;
+    };
     struct Result {
         BeatsPointer grid;
         std::array<double, 2> scores{};
+        std::array<std::array<PulseSupport, 2>, 2> support{};
+        std::array<PulseSupport, 2> fullSupport{};
+        double density = 0;
+        bool unstableDensity = false;
         bool reliable = false;
         bool phaseChanges = false;
         std::vector<double> phaseBoundaries{};
@@ -34,8 +42,9 @@ class BeatGridEvidence {
     struct Score {
         double f1 = 0;
         double precision = 0;
+        double recall = 0;
     };
-    using Scores = std::array<std::array<Score, 2>, 3>;
+    using Scores = std::array<std::array<Score, 2>, 4>;
     Scores measure(const std::vector<double>& beats,
             double shift,
             double start,
@@ -46,11 +55,13 @@ class BeatGridEvidence {
     int m_hop = 0;
     int m_pending = 0;
     double m_sum = 0;
+    double m_blockEnergy = 0;
     double m_energy = 0;
     SINT m_frames = 0;
     bool m_prepared = false;
     std::vector<double> m_wave;
-    std::array<std::vector<Event>, 3> m_events;
+    std::vector<double> m_fullBandEnergy;
+    std::array<std::vector<Event>, 4> m_events;
 };
 
 } // namespace mixxx

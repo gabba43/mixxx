@@ -215,7 +215,7 @@ cause a physically constant song to use a variable grid.
 
 The conservative clock-fit follow-up used `auto:2` and Beat This! backend
 identity `3`. The subsequent audio-validation pass uses `auto:3`,
-`audio_grid_evidence:1` and Custom Models backend `2`. The neural worker and
+`audio_grid_evidence:2` and Custom Models backend `2`. The neural worker and
 checkpoint are unchanged. Request reanalysis of unlocked tracks to replace
 old results; BPM locks and reanalysis preferences still apply.
 
@@ -248,10 +248,20 @@ no positive evidence. This is onset evidence, not drum-stem separation.
 
 For each candidate, Gaussian timing tolerances of 12 and 25 ms measure
 supported predicted pulses and strength-weighted onset recall. Their
-harmonic mean prevents a sparse, incorrect 2:3 beat interpretation from
-winning merely because some of its beats coincide with real attacks.
+harmonic mean balances pulse precision and onset coverage; comparisons
+between different pulse densities need the additional guard below.
 Scores use the low and broad channels; the intermediate channel corroborates
-small timing corrections. Phase searches consider the supplied beat family
+small timing corrections. A fourth full-band RMS envelope retains snare and
+hi-hat transients that disappear when averaging the waveform before low-pass
+filtering. Half-beat changes also need corroboration from this envelope and
+2.5 times the other phase's full-band pulse precision. When snares still
+support the original phase, louder offbeat kicks must not move the grid;
+ambiguous windows provide no phase-change evidence. This is a conservative
+engineering cutoff, not an estimate of the probability of a phase edit.
+The comparison retains full-band support at the unchanged grid as well as
+at the bass-optimized fine offset, so that searching for kicks cannot erase
+the snare evidence that should veto a half-beat shift.
+Phase searches consider the supplied beat family
 and its half-beat alternative, with fine offsets limited to 75 ms or 15%
 of a beat, whichever is smaller. Candidate clocks are ranked at their
 attainable phase; translating a grid requires additional evidence.
@@ -261,6 +271,25 @@ more than 0.08, or a sustained phase edit requires a map. A usable candidate
 can also replace an unsupported one. With insufficient evidence, the earlier
 clock-only decision remains the fallback. These scores and cutoffs are
 engineering heuristics, not calibrated probabilities or benchmark accuracy.
+
+When the Variable candidate is sparser than Constant and its 90th-percentile
+beat interval exceeds 1.25 times its 10th percentile, compare pulse precision
+against the same number of beat opportunities. Keep strength-weighted onset
+recall unchanged, and recompute the two-band F1 scores. This prevents a
+tracker alternating among half-time and 2:3 levels from improving precision
+simply by omitting harder beat lines. A steady half-tempo candidate keeps
+its original score; there is no general preference for doubling BPM.
+When full-band evidence is available, a normalized Variable candidate must
+also improve full-band pulse support; following sparse kicks alone cannot
+override a stable snare/hi-hat clock.
+The phase search still optimizes the original F1 score, so this normalization
+is a conservative ranking heuristic rather than an optimal joint search.
+
+Sparse percussion can support both fewer hits at unchanged tempo and a real
+metrical tempo change. This rule favors a supported Constant clock when the
+alternative changes pulse density; abrupt half/double-tempo changes can
+therefore remain ambiguous. Full-band corroboration does not identify the
+intended musical meter. Explicit Variable remains available.
 
 Fine translations must improve support on both halves of the recording.
 A more conservative correction of at most 10 ms can compensate for the
@@ -288,6 +317,12 @@ can run one neural inference even when the final choice is Variable. This
 adds work relative to the former Queen-Mary-only Variable route. Identical
 assignments still use one inference. There are no new Python requirements,
 checkpoint downloads, per-song rules or model-training steps.
+
+The current CPU worker starts a Python process and loads the model for each
+track; Torch uses two intra-operation threads and one inter-operation thread.
+Imports, model loading and the additional Auto candidate comparison contribute
+to runtime. This refinement adds onset validation and makes no throughput
+claim against Traktor, whose complete analysis implementation is proprietary.
 
 The second supplied set checks these outcomes with Constant=Beat This! and
 Variable=Queen Mary:
@@ -325,6 +360,31 @@ Synthetic ground-truth tests separately exercise fine timing, chunk sizes,
 sample rates, long 44.1 kHz clock accuracy, half-beat labels, offbeat hi-hats,
 short fills, sustained phase edits, non-window-aligned edit boundaries,
 metrical switches, drifting Constant candidates and genuine tempo changes.
+
+## Syncopated breakbeat regression recordings
+
+The third supplied set exposes a distinction between rhythmic arrangement
+changes and changes in the underlying clock. Bass-only half-phase evidence
+incorrectly rejected the Constant candidates for Splash and Apollo Two.
+In Code Red, Queen Mary's sparser, metrically switching grid gained precision
+by skipping pulses. Full-band corroboration and the guarded common-density
+comparison address those mechanisms without recording-specific rules.
+
+With Constant=Beat This!, Variable=Queen Mary and Auto, the supplied recordings
+are checked as Constant at approximately 163.55 BPM (Splash – Babylon),
+157.40 BPM (Apollo Two – Atlantis, L.T.J. Bukem Remix), and 170.28 BPM
+(Code Red – Conquering Lion). These whole-track estimates agree with the
+user's independently supplied reference BPMs; the complete analysis test
+checks agreement within 0.02 BPM. The previous 17 fixtures
+remain included, especially G-Man, Bazetoya, HMC and the true half-beat edits.
+
+Synthetic breakbeats vary kicks independently of snares and hats; controls
+move the entire pattern, introduce smooth tempo drift, or supply a genuine
+steady half-tempo pulse. Original audio and prediction files stay outside
+the repository. No new Python libraries, checkpoints or training are needed.
+Add `splash.f32`, `apollo.f32`, `code-red.f32` and their official
+`*-baseline.json` worker outputs to `MIXXX_TEST_PHASE_GRID_TRACK_DIRECTORY`
+to include these recordings in both the cached and complete-model tests.
 
 ## Conservative Auto regression recordings
 
@@ -450,9 +510,9 @@ with local `hmc.f32`, `gnosis.f32` mono float32 files at 44.1 kHz and their
 `*-baseline.json` model results. Original music files are not included in
 the repository.
 
-Final validation in this environment: the Debug build succeeded; all 1,330
+Final validation in this environment: the Debug build succeeded; all 1,336
 active CTest cases passed, including the real-model integration tests,
-the 17 complete Custom Models analyses and the supplied-track regressions.
+the 20 complete Custom Models analyses and the supplied-track regressions.
 The 38 existing disabled cases remained disabled; no active test was skipped.
 All 31 installer/worker Python tests, Black, Flake8 and formatting checks
 for the changed C++ files passed.

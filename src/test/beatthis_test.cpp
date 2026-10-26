@@ -1134,6 +1134,15 @@ TEST_F(BeatThisAnalyzerTest, UploadedCustomModelsChooseConservativeGridTypes) {
         if (name == "lester") {
             EXPECT_NEAR(140, bpm, 1);
         }
+        if (name == "splash") {
+            EXPECT_NEAR(163.55, bpm, 0.02);
+        }
+        if (name == "apollo") {
+            EXPECT_NEAR(157.40, bpm, 0.02);
+        }
+        if (name == "code-red") {
+            EXPECT_NEAR(170.28, bpm, 0.02);
+        }
         if (grid->hasConstantTempo()) {
             EXPECT_FALSE(grid->getDownbeats().isEmpty());
         }
