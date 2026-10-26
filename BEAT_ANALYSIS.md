@@ -105,10 +105,10 @@ Beat This!, with Queen Mary/Beat This! as the initial pair. Beat This! uses
 the existing shared Python/checkpoint/SHA-256 settings. SoundTouch remains
 available as a separate legacy BPM-only provider.
 
-The existing Auto, Constant and Variable controls and the Auto grid-fit
-thresholds remain in use. Explicit Constant/Variable uses only its assigned
+The existing Auto, Constant and Variable controls remain in use. Explicit
+Constant/Variable uses only its assigned
 analyzer. For Auto with different assignments, the Variable analyzer's
-full-track beats are evaluated with the existing Auto grid-fit check. That
+full-track beats are evaluated with the Auto clock-fit check described below. That
 decision selects the assigned Constant or Variable analyzer, and its result
 is built as the decided grid type. The Constant analyzer is fed audio during
 decoding but is finalized only when Auto decides Constant. Both analyzers
@@ -155,13 +155,42 @@ Preferences > Beat Detection now offers three grid modes. The track analysis
 menu also offers overrides for individual tracks without changing the global
 preference.
 
-- **Auto** tests a constant candidate against detected beats across the whole
-  track. It keeps the constant grid only when at least 90% of the beats fit
-  within 40 ms or 10% of a beat, whichever is smaller. Two consecutive
-  16-beat blocks with at least four outliers each also reject the constant
-  candidate. At least 32 predictions are required to accept a constant grid.
-  Otherwise it uses the variable result.
-- **Constant** forces the existing single-tempo grid construction.
+- **Auto** fits a clock over the full track before assessing sustained
+  timing drift. A search within 0.8% of the original constant candidate
+  maximizes circular phase coherence on a half-beat lattice. This handles
+  temporary offbeat/subdivision mistakes without doubling the reported BPM.
+  The search uses at most 1,024 sampled predictions and three refinement
+  passes. No Python dependency or second model run is added.
+  Phase estimates in 32-beat windows separate smooth drift from isolated
+  tracker phase steps. Short tracks use smaller windows, with at least eight
+  beats per window and 32 predictions overall. At least four reliable windows,
+  80% reliable windows and 0.65 global coherence are required. Reliable
+  windows have at least 0.7 circular coherence; these are engineering cutoffs,
+  not confidence probabilities.
+  An isolated phase increment exceeding 40 ms or 8% of a beat, whichever
+  is larger, can be treated as a nuisance phase change. Consecutive
+  increments in the same direction are retained as drift; short gaps of
+  incoherent tracking can also separate nuisance phase steps. At most two
+  such steps, or one per eight reliable windows for longer tracks, are
+  accepted. After removing a linear timing trend, the 5th-to-95th-percentile
+  phase span must fit within 50 ms or 10% of a beat, whichever is larger.
+  The first and last two reliable windows are also checked separately against
+  a 40 ms/8% limit, so sustained end drift cannot simply be trimmed away.
+  Window beat-interval averages additionally guard against real half/double
+  or 2:3 tempo changes being mistaken for offbeat slips: the central 20–80%
+  period range and the start/end period ratio must stay within a factor of 1.25.
+  Otherwise Auto selects Variable.
+- **Constant** forces a single-tempo grid. For providers that preserve raw
+  beat positions, including Beat This!, the fitted clock replaces coarse
+  region-based tempo rounding. Where at least four stable 64-beat regressions
+  are available, their 10%-trimmed mean supplies the tempo. Each regression
+  must stay within 40 ms of its local straight grid and within 0.8% of the
+  fitted clock. Without identified tracker phase steps, the local estimate
+  must also stay within 25 ms cumulative timing difference over the entire
+  track; otherwise the global clock is retained. This prevents repeated
+  local timing biases from accumulating into a drifting constant grid.
+  A circular full-beat mean supplies the grid phase. Native
+  Queen Mary explicit Constant analysis keeps its existing construction.
 - **Variable** preserves Beat This! beat positions directly, including tempo
   changes. It bypasses the Queen Mary-oriented region smoothing previously
   applied to every provider. Downbeats remain attached to those positions.
@@ -177,9 +206,19 @@ beat-position-based tempo. Sparse maps retain their existing calculation.
 
 Auto is the default for a fresh configuration. Existing constant/variable
 preferences are migrated to the corresponding explicit mode. Auto is a
-conservative grid-fit check, not a measurement of the model's confidence or
-a proof of the intended musical tempo. Ambiguous predictions can cause a
-physically constant song to use a variable grid.
+timing heuristic, not a measurement of model confidence or proof of intended
+musical tempo. A genuine abrupt phase edit and a tracker phase error can
+look identical in beat timestamps. Explicit Variable remains available
+when such edits must be represented. Low-coherence predictions can still
+cause a physically constant song to use a variable grid.
+
+The conservative follow-up changes the Auto analysis identity to `auto:2`
+and the Beat This! backend identity to `3`. Request reanalysis of unlocked
+tracks to replace old results; BPM locks and reanalysis preferences still
+apply. Auto routing continues to inspect the assigned Variable analyzer
+and then selects the assigned Constant or Variable model. In particular,
+the user's Constant=Beat This!, Variable=Queen Mary setup does not require
+finalizing the neural model for tracks that are classified Variable.
 
 Fast analysis is available only in Constant mode. Auto and Variable analyze
 the full track even if an old configuration still has fast analysis enabled.
@@ -195,6 +234,58 @@ the disabled dialog returned before populating its selections. It now shows
 the saved provider and grid mode in that state too. This does not establish
 that every reported intermittent reset had that cause. Opening an older Mixxx
 build with the same profile can still overwrite settings it does not support.
+
+## Conservative Auto regression recordings
+
+The six supplied recordings were decoded in full as mono float32 at 44.1 kHz.
+The original Auto check classified all six as Variable, using both the cached
+`final0` predictions and native Queen Mary Variable predictions. In the user's
+Custom Models setup, Queen Mary's 70 BPM result for Donkey Rhubarb therefore
+remained selected instead of the roughly 140 BPM Beat This! result.
+
+The regression tests check both providers' Auto decisions and the complete
+Custom Models path with Constant=Beat This!, Variable=Queen Mary. Slow,
+coherent curvature in Bazetoya remains distinguishable from the temporary
+Queen Mary phase displacement in Black Circles and its return to the grid.
+No track names, target BPM values or recording-specific exceptions enter
+the production algorithm. Music and full model predictions remain outside
+the repository.
+
+Measured complete-path results with that Custom Models assignment:
+
+| Recording | Auto result | Reported constant BPM |
+| --- | --- | ---: |
+| Acid Jesus – Uranium Smuggle | Constant | 127.85 |
+| Aphex Twin – Donkey Rhubarb | Constant | 140.00 |
+| Aural Traxx – Spinal Column | Constant | 133.87 |
+| Bazetoya – Hell & Jonzon / EP No. 1 | Variable | — |
+| Mike Dearborn – Black Circles | Constant | 132.06 |
+| Mike Ink – Live Evil Part II – Side A | Constant | 149.18 |
+
+The Black Circles regression also checks the median grid distance at the
+beginning and end against the model's beat positions. Synthetic checks cover
+short tracks at 44.1/48 kHz, quantization, temporary/permanent tracker phase
+steps, offbeat slips, small returning timing excursions, smooth tempo drift,
+sustained end drift and 120-to-240/80 BPM changes. A repeated 20 ms local
+timing-bias case guards against roughly 0.1 BPM tempo error and up to 215 ms
+median grid error from a solely local tempo mean. The whole-track refinement
+guard prevents that accumulation in both Auto and explicit Constant mode.
+
+Set `MIXXX_TEST_AUTO_GRID_TRACK_DIRECTORY` to a local directory containing
+`acid`, `aphex`, `aural`, `bazetoya`, `black` and `mike-ink` mono `.f32` files
+and their `*-baseline.json` official-worker outputs. The beat-clock regression
+also runs native Queen Mary over these files. With
+`MIXXX_TEST_BEAT_THIS_PYTHON` and `MIXXX_TEST_BEAT_THIS_MODEL` set as above,
+`UploadedCustomModelsChooseConservativeGridTypes` runs the full analyzer and
+checks grid type, the reported Aphex/Black Circles tempos, progress, downbeat
+storage and serialization. Results are written to `custom-models-report.json`
+in that external directory.
+
+These user-labelled examples are a targeted regression set. They establish
+neither general accuracy nor parity with Traktor Pro 4: no paired Traktor
+outputs or independent annotated music benchmark were available for this
+comparison. Constant/Variable routing accuracy, strict tempo accuracy,
+beat phase and bar/downbeat accuracy are separate evaluation targets.
 
 ## Analysis progress and supplied logs
 
@@ -268,11 +359,12 @@ with local `hmc.f32`, `gnosis.f32` mono float32 files at 44.1 kHz and their
 `*-baseline.json` model results. Original music files are not included in
 the repository.
 
-Final validation in this environment: the Debug build succeeded; all 1,301
-active CTest cases passed, including both real-model integration tests and
-the supplied-track regression. The
-38 existing disabled cases remained disabled. Both Python checks, Black,
-Flake8 and formatting checks for the new C++ integration files passed.
+Final validation in this environment: the Debug build succeeded; all 1,319
+active CTest cases passed, including the real-model integration tests,
+the six complete Custom Models analyses and the supplied-track regressions.
+The 38 existing disabled cases remained disabled; no active test was skipped.
+All 31 installer/worker Python tests, Black, Flake8 and formatting checks
+for the changed C++ files passed.
 Mixxx also initialized its database, loaded the LateNight skin, opened
 virtual audio output and entered its event loop in the headless startup
 check. This does not validate hardware audio or GPU rendering.
@@ -281,8 +373,8 @@ These synthetic checks demonstrate integration and regressions, not
 accuracy on a representative music collection. A 4/4 pulse with subdivisions
 can support several metrical interpretations. The neural model also makes
 mistakes; it does not guarantee the intended tempo or musical “1” for every
-track. Annotated real music, especially the user's failure cases, is still
-needed to assess improvement and genre regressions before live use.
+track. The six user-labelled cases are now covered, but a broader annotated
+music collection is still needed to assess generalization and genre regressions.
 
 Direct `final0` worker runs on two generated 24-second drum fixtures returned
 mean beat rates of 119.90 and 173.91 BPM for targets of 120 and 174 BPM.

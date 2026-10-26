@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -125,6 +126,29 @@ TEST(CustomAnalysisTest, AutoKeepsVariableBackendWithoutFinalizingConstant) {
     EXPECT_EQ(BeatGridMode::Variable, plugin.resolvedTempoMode());
     EXPECT_EQ(positions, plugin.getBeats());
     EXPECT_TRUE(plugin.preservesBeatPositions());
+}
+
+TEST(CustomAnalysisTest, AutoConstantUsesAssignedTempoInsteadOfVariableHalfTime) {
+    using namespace mixxx;
+    QVector<audio::FramePos> constant;
+    QVector<audio::FramePos> variable;
+    for (int i = 0; i < 256; ++i) {
+        constant.push_back(audio::FramePos((0.2 + i * 60.0 / 140) * kRate));
+        variable.push_back(audio::FramePos((0.2 + i * 60.0 / 70 + (i >= 128 ? 0.1 : 0)) * kRate));
+    }
+    int constantCalls = 0;
+    int variableCalls = 0;
+    AnalyzerCustomBeats plugin(BeatGridMode::Auto,
+            std::make_unique<StubBeatAnalyzer>(constant, &constantCalls),
+            std::make_unique<StubBeatAnalyzer>(variable, &variableCalls));
+    ASSERT_TRUE(plugin.initialize(kRate));
+    ASSERT_TRUE(plugin.finalize());
+    EXPECT_EQ(1, constantCalls);
+    EXPECT_EQ(1, variableCalls);
+    EXPECT_EQ(BeatGridMode::Constant, plugin.resolvedTempoMode());
+    const auto grid = BeatFactory::makePreferredBeats(plugin.getBeats(), {}, plugin.resolvedTempoMode(), kRate, plugin.preservesBeatPositions());
+    ASSERT_TRUE(grid);
+    EXPECT_NEAR(140, grid->getBpmAroundPosition(constant.front(), 1).value(), 0.01);
 }
 
 TEST(CustomAnalysisTest, FailureDoesNotExposeTheOtherBackendsGrid) {
@@ -499,6 +523,155 @@ TEST(BeatThisGridModeTest,
     EXPECT_NEAR(120, grid->getBpmAroundPosition(positions[80], 4).value(), 0.1);
 }
 
+TEST(BeatThisRealTrackTest, ConservativeAutoGridRegression) {
+    const auto directory = qEnvironmentVariable("MIXXX_TEST_AUTO_GRID_TRACK_DIRECTORY");
+    if (directory.isEmpty()) {
+        GTEST_SKIP() << "Set MIXXX_TEST_AUTO_GRID_TRACK_DIRECTORY for uploaded regressions";
+    }
+    for (const QString name : {"acid", "aphex", "aural", "bazetoya", "black", "mike-ink"}) {
+        SCOPED_TRACE(name.toStdString());
+        QFile audio(QDir(directory).filePath(name + ".f32"));
+        QFile predictions(QDir(directory).filePath(name + "-baseline.json"));
+        ASSERT_TRUE(audio.open(QIODevice::ReadOnly));
+        ASSERT_TRUE(predictions.open(QIODevice::ReadOnly));
+        QVector<mixxx::audio::FramePos> positions;
+        QVector<mixxx::audio::FramePos> downbeats;
+        ASSERT_TRUE(mixxx::AnalyzerBeatThis::parseResults(predictions.readAll(),
+                "8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331",
+                kRate,
+                audio.size() / sizeof(float),
+                &positions,
+                &downbeats));
+        mixxx::AnalyzerQueenMaryBeats queenMary(mixxx::BeatGridMode::Variable);
+        ASSERT_TRUE(queenMary.initialize(kRate));
+        std::vector<float> mono(4096);
+        std::vector<CSAMPLE> stereo(8192);
+        while (!audio.atEnd()) {
+            const auto count = audio.read(reinterpret_cast<char*>(mono.data()),
+                                       mono.size() * sizeof(float)) /
+                    sizeof(float);
+            for (size_t i = 0; i < count; ++i) {
+                stereo[2 * i] = stereo[2 * i + 1] = mono[i];
+            }
+            ASSERT_TRUE(queenMary.processSamples(stereo.data(), count * 2));
+        }
+        ASSERT_TRUE(queenMary.finalize());
+        const auto qmPositions = queenMary.getBeats();
+        const auto qmAutomatic = BeatFactory::makePreferredBeats(qmPositions,
+                {},
+                mixxx::BeatGridMode::Auto,
+                kRate,
+                false);
+        ASSERT_TRUE(qmAutomatic);
+        EXPECT_EQ(name != "bazetoya", qmAutomatic->hasConstantTempo());
+        QJsonArray qmBeats;
+        for (const auto beat : qmPositions) {
+            qmBeats.append(beat.value() / 44100.0);
+        }
+        QFile qmOutput(QDir(directory).filePath(name + "-qm-beats.json"));
+        ASSERT_TRUE(qmOutput.open(QIODevice::WriteOnly));
+        qmOutput.write(QJsonDocument(QJsonObject{{"beats", qmBeats}}).toJson());
+        qInfo() << name << "QM auto constant" << qmAutomatic->hasConstantTempo()
+                << "BPM" << qmAutomatic->getBpmInRange(qmPositions.front(), qmPositions.back()).value();
+        const auto constant = BeatFactory::makePreferredBeats(
+                positions, {}, mixxx::BeatGridMode::Constant, kRate, true);
+        const auto automatic = BeatFactory::makePreferredBeats(
+                positions, {}, mixxx::BeatGridMode::Auto, kRate, true);
+        ASSERT_TRUE(constant);
+        ASSERT_TRUE(automatic);
+        const double bpm = constant->getBpmAroundPosition(positions.front(), 1).value();
+        qInfo() << name << "constant candidate BPM" << bpm << "anchor seconds"
+                << constant->firstBeat().value() / 44100.0
+                << "auto constant" << automatic->hasConstantTempo();
+        EXPECT_EQ(name != "bazetoya", automatic->hasConstantTempo());
+        if (name == "black") {
+            EXPECT_NEAR(132.06, automatic->getBpmAroundPosition(positions.front(), 1).value(), 0.03);
+            for (const int start : {0, static_cast<int>(positions.size()) - 64}) {
+                std::vector<double> errors;
+                for (int i = start; i < start + 64; ++i) {
+                    errors.push_back(std::abs(automatic->findClosestBeat(positions[i]) - positions[i]) / 44100.0);
+                }
+                std::sort(errors.begin(), errors.end());
+                EXPECT_LT(errors[errors.size() / 2], 0.04);
+            }
+        }
+        if (name == "aphex") {
+            EXPECT_NEAR(140, automatic->getBpmInRange(positions.front(), positions.back()).value(), 1);
+        }
+    }
+}
+
+TEST_F(BeatThisAnalyzerTest, UploadedCustomModelsChooseConservativeGridTypes) {
+    const auto directory = qEnvironmentVariable("MIXXX_TEST_AUTO_GRID_TRACK_DIRECTORY");
+    const auto python = qEnvironmentVariable("MIXXX_TEST_BEAT_THIS_PYTHON");
+    const auto model = qEnvironmentVariable("MIXXX_TEST_BEAT_THIS_MODEL");
+    if (directory.isEmpty() || python.isEmpty() || model.isEmpty()) {
+        GTEST_SKIP() << "Set uploaded-track directory, Python and model for full Custom Models validation";
+    }
+    BeatDetectionSettings settings(config());
+    settings.setBeatPluginId("custom-models:1");
+    settings.setCustomConstantPlugin("beat-this:1");
+    settings.setCustomVariablePlugin("qm-tempotracker:0");
+    settings.setBeatThisPython(python);
+    settings.setBeatThisModel(model);
+    settings.setTempoMode(mixxx::BeatGridMode::Auto);
+    QJsonArray reports;
+    for (const QString name : {"acid", "aphex", "aural", "bazetoya", "black", "mike-ink"}) {
+        SCOPED_TRACE(name.toStdString());
+        QFile audio(QDir(directory).filePath(name + ".f32"));
+        ASSERT_TRUE(audio.open(QIODevice::ReadOnly));
+        const auto frames = audio.size() / sizeof(float);
+        auto track = Track::newTemporary();
+        track->setAudioProperties(mixxx::audio::ChannelCount::stereo(), kRate, mixxx::audio::Bitrate(), mixxx::Duration::fromSeconds(frames / 44100.0));
+        AnalyzerBeats analyzer(config());
+        ASSERT_TRUE(analyzer.initialize(AnalyzerTrack(track), kRate, mixxx::audio::ChannelCount::stereo(), frames));
+        std::vector<float> mono(4096);
+        std::vector<CSAMPLE> stereo(8192);
+        while (!audio.atEnd()) {
+            const auto count = audio.read(reinterpret_cast<char*>(mono.data()),
+                                       mono.size() * sizeof(float)) /
+                    sizeof(float);
+            for (size_t i = 0; i < count; ++i) {
+                stereo[i * 2] = stereo[i * 2 + 1] = mono[i];
+            }
+            ASSERT_TRUE(analyzer.processSamples(stereo.data(), count * 2));
+        }
+        QElapsedTimer timer;
+        timer.start();
+        QVector<double> progress;
+        analyzer.storeResultsWithProgress(track, [&progress](double value) { progress.push_back(value); });
+        analyzer.cleanup();
+        const auto grid = track->getBeats();
+        ASSERT_TRUE(grid);
+        EXPECT_EQ(name != "bazetoya", grid->hasConstantTempo());
+        EXPECT_TRUE(std::is_sorted(progress.begin(), progress.end()));
+        ASSERT_FALSE(progress.isEmpty());
+        EXPECT_DOUBLE_EQ(1, progress.back());
+        const double bpm = track->getBpm();
+        if (name == "aphex") {
+            EXPECT_NEAR(140, bpm, 0.05);
+        }
+        if (name == "black") {
+            EXPECT_NEAR(132.06, bpm, 0.015);
+        }
+        if (grid->hasConstantTempo()) {
+            EXPECT_FALSE(grid->getDownbeats().isEmpty());
+        }
+        const auto restored = mixxx::Beats::fromByteArray(kRate,
+                grid->getVersion(),
+                grid->getSubVersion(),
+                grid->toByteArray());
+        ASSERT_TRUE(restored);
+        EXPECT_EQ(grid->hasConstantTempo(), restored->hasConstantTempo());
+        EXPECT_EQ(grid->getDownbeats(), restored->getDownbeats());
+        reports.append(QJsonObject{{"track", name}, {"constant", grid->hasConstantTempo()}, {"bpm", bpm}, {"downbeats", grid->getDownbeats().size()}, {"finalize_seconds", timer.elapsed() / 1000.0}});
+    }
+    QFile output(QDir(directory).filePath("custom-models-report.json"));
+    ASSERT_TRUE(output.open(QIODevice::WriteOnly));
+    output.write(QJsonDocument(reports).toJson());
+    qInfo().noquote() << QJsonDocument(reports).toJson(QJsonDocument::Compact);
+}
+
 TEST(BeatThisGridModeTest, AutoRetainsSustainedTempoChangesAndManualOverride) {
     QVector<mixxx::audio::FramePos> positions;
     double time = 0.2;
@@ -519,6 +692,132 @@ TEST(BeatThisGridModeTest, AutoRetainsSustainedTempoChangesAndManualOverride) {
         EXPECT_NEAR(position.value(),
                 automatic->findClosestBeat(position).value(),
                 1);
+    }
+}
+
+TEST(BeatThisGridModeTest, ShortQuantizedConstantTracksRemainConstant) {
+    for (const int rate : {44100, 48000}) {
+        for (const int count : {32, 48, 96}) {
+            for (const double bpm : {80.0, 132.06, 174.0, 210.0}) {
+                SCOPED_TRACE(testing::Message() << rate << " Hz, " << count << " beats, " << bpm << " BPM");
+                QVector<mixxx::audio::FramePos> positions;
+                for (int i = 0; i < count; ++i) {
+                    positions.push_back(mixxx::audio::FramePos(
+                            std::round((0.2 + i * 60 / bpm) * 50) / 50 * rate));
+                }
+                const auto grid = BeatFactory::makePreferredBeats(positions,
+                        {},
+                        mixxx::BeatGridMode::Auto,
+                        mixxx::audio::SampleRate(rate),
+                        true);
+                ASSERT_TRUE(grid);
+                EXPECT_TRUE(grid->hasConstantTempo());
+                EXPECT_NEAR(bpm, grid->getBpmInRange(positions.front(), positions.back()).value(), 0.15);
+            }
+        }
+    }
+}
+
+TEST(BeatThisGridModeTest, TrackerPhaseStepsAndOffbeatSlipsDoNotImplyChangingTempo) {
+    for (const double bpm : {120.0, 149.18}) {
+        for (const bool permanent : {false, true}) {
+            SCOPED_TRACE(testing::Message() << bpm << " BPM, permanent " << permanent);
+            QVector<mixxx::audio::FramePos> positions;
+            for (int i = 0; i < 1024; ++i) {
+                const double phase = i >= 448 && (permanent || i < 576) ? 0.09 : 0;
+                const double metricalSlip = i >= 192 && i < 256 ? 30 / bpm : 0;
+                const double transition = (i >= 448 && i < 464) || (i >= 576 && i < 592) ? 0.06 * std::sin(i * 0.7) : 0;
+                const double time = std::round((0.2 + i * 60 / bpm + phase + metricalSlip + transition) * 50) / 50;
+                positions.push_back(mixxx::audio::FramePos(time * kRate));
+            }
+            const auto automatic = BeatFactory::makePreferredBeats(
+                    positions, {}, mixxx::BeatGridMode::Auto, kRate, true);
+            ASSERT_TRUE(automatic);
+            EXPECT_TRUE(automatic->hasConstantTempo());
+            EXPECT_NEAR(bpm, automatic->getBpmAroundPosition(positions.front(), 1).value(), 0.03);
+            const auto forced = BeatFactory::makePreferredBeats(
+                    positions, {}, mixxx::BeatGridMode::Variable, kRate, true);
+            ASSERT_TRUE(forced);
+            EXPECT_FALSE(forced->hasConstantTempo());
+            for (const auto position : positions) {
+                EXPECT_NEAR(position.value(), forced->findClosestBeat(position).value(), 1);
+            }
+        }
+    }
+}
+
+TEST(BeatThisGridModeTest, SmoothTimingExcursionsAreJudgedByTheirSize) {
+    for (const double amplitude : {0.02, 0.09}) {
+        for (const bool preserve : {false, true}) {
+            QVector<mixxx::audio::FramePos> positions;
+            for (int i = 0; i < 1024; ++i) {
+                const double time = 0.2 + i * 60 / 132.06 + amplitude * std::sin(M_PI * i / 1023);
+                positions.push_back(mixxx::audio::FramePos(std::round(time * 50) / 50 * kRate));
+            }
+            const auto grid = BeatFactory::makePreferredBeats(
+                    positions, {}, mixxx::BeatGridMode::Auto, kRate, preserve);
+            ASSERT_TRUE(grid);
+            EXPECT_EQ(amplitude < 0.05, grid->hasConstantTempo());
+        }
+    }
+}
+
+TEST(BeatThisGridModeTest, SustainedDriftAtTheEndMustNotBeTrimmedAsOutliers) {
+    for (const double drift : {0.12, 0.4}) {
+        QVector<mixxx::audio::FramePos> positions;
+        for (int i = 0; i < 1024; ++i) {
+            const double tail = std::max(0, i - 895) / 128.0;
+            const double time = 0.2 + i * 0.5 + drift * tail;
+            positions.push_back(mixxx::audio::FramePos(std::round(time * 50) / 50 * kRate));
+        }
+        const auto grid = BeatFactory::makePreferredBeats(
+                positions, {}, mixxx::BeatGridMode::Auto, kRate, true);
+        ASSERT_TRUE(grid);
+        EXPECT_FALSE(grid->hasConstantTempo());
+    }
+}
+
+TEST(BeatThisGridModeTest, SustainedMetricalTempoChangesAreNotOffbeatSlips) {
+    for (const double secondBpm : {80.0, 240.0}) {
+        for (const int changeBeat : {512, 896}) {
+            SCOPED_TRACE(testing::Message() << secondBpm << " BPM at beat " << changeBeat);
+            QVector<mixxx::audio::FramePos> positions;
+            double time = 0.2;
+            for (int i = 0; i < 1024; ++i) {
+                positions.push_back(mixxx::audio::FramePos(std::round(time * 50) / 50 * kRate));
+                time += 60.0 / (i < changeBeat ? 120 : secondBpm);
+            }
+            const auto grid = BeatFactory::makePreferredBeats(
+                    positions, {}, mixxx::BeatGridMode::Auto, kRate, true);
+            ASSERT_TRUE(grid);
+            EXPECT_FALSE(grid->hasConstantTempo());
+        }
+    }
+}
+
+TEST(BeatThisGridModeTest, LocalTimingBiasMustNotAccumulateIntoConstantGridDrift) {
+    for (const double bpm : {120.0, 132.06}) {
+        for (const auto mode : {mixxx::BeatGridMode::Auto, mixxx::BeatGridMode::Constant}) {
+            SCOPED_TRACE(testing::Message() << bpm << " BPM, mode " << static_cast<int>(mode));
+            QVector<mixxx::audio::FramePos> positions;
+            for (int i = 0; i < 2048; ++i) {
+                const double timingBias = (i % 64) * 0.02 / 63;
+                const double time = 0.2 + i * 60 / bpm + timingBias;
+                positions.push_back(mixxx::audio::FramePos(std::round(time * 50) / 50 * kRate));
+            }
+            const auto grid = BeatFactory::makePreferredBeats(positions, {}, mode, kRate, true);
+            ASSERT_TRUE(grid);
+            EXPECT_TRUE(grid->hasConstantTempo());
+            EXPECT_NEAR(bpm, grid->getBpmInRange(positions.front(), positions.back()).value(), 0.01);
+            for (const int start : {0, static_cast<int>(positions.size()) - 64}) {
+                std::vector<double> errors;
+                for (int i = start; i < start + 64; ++i) {
+                    errors.push_back(std::abs(grid->findClosestBeat(positions[i]) - positions[i]) / 44100.0);
+                }
+                std::sort(errors.begin(), errors.end());
+                EXPECT_LT(errors[errors.size() / 2], 0.035);
+            }
+        }
     }
 }
 

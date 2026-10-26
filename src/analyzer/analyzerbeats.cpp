@@ -379,14 +379,14 @@ QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
     QHash<QString, QString> extraVersionInfo;
     extraVersionInfo["vamp_plugin_id"] = pluginId;
     if (mode == mixxx::BeatGridMode::Auto) {
-        extraVersionInfo["tempo_mode"] = "auto:1";
+        extraVersionInfo["tempo_mode"] = "auto:2";
     }
     if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
         extraVersionInfo["beat_tracker_version"] = "3";
     }
     if (pluginId == mixxx::AnalyzerBeatThis::pluginInfo().id()) {
         extraVersionInfo["model_sha256"] = modelSha256.toLower();
-        extraVersionInfo["beat_this_backend"] = "2";
+        extraVersionInfo["beat_this_backend"] = "3";
     }
     if (bPreferencesFastAnalysis) {
         extraVersionInfo["fast_analysis"] = "1";
