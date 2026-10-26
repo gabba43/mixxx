@@ -9,6 +9,8 @@
 
 namespace mixxx {
 
+class BeatGridEvidence;
+
 class AnalyzerCustomBeats final : public AnalyzerBeatsPlugin {
   public:
     static AnalyzerPluginInfo pluginInfo() {
@@ -19,7 +21,8 @@ class AnalyzerCustomBeats final : public AnalyzerBeatsPlugin {
     }
     AnalyzerCustomBeats(BeatGridMode mode,
             std::unique_ptr<AnalyzerBeatsPlugin> constant,
-            std::unique_ptr<AnalyzerBeatsPlugin> variable);
+            std::unique_ptr<AnalyzerBeatsPlugin> variable,
+            const BeatGridEvidence* audioEvidence = nullptr);
     AnalyzerPluginInfo info() const override {
         return pluginInfo();
     }
@@ -33,6 +36,9 @@ class AnalyzerCustomBeats final : public AnalyzerBeatsPlugin {
     Bpm getBpm() const override;
     QVector<audio::FramePos> getBeats() const override;
     QVector<audio::FramePos> getDownbeats() const override;
+    BeatsPointer preparedGrid() const {
+        return m_preparedGrid;
+    }
     BeatGridMode resolvedTempoMode() const {
         return m_mode == BeatGridMode::Auto
                 ? (m_selected == m_constant.get() ? BeatGridMode::Constant : BeatGridMode::Variable)
@@ -45,6 +51,8 @@ class AnalyzerCustomBeats final : public AnalyzerBeatsPlugin {
     std::unique_ptr<AnalyzerBeatsPlugin> m_constant;
     std::unique_ptr<AnalyzerBeatsPlugin> m_variable;
     AnalyzerBeatsPlugin* m_selected = nullptr;
+    const BeatGridEvidence* m_audioEvidence;
+    BeatsPointer m_preparedGrid;
 };
 
 } // namespace mixxx

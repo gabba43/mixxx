@@ -106,17 +106,18 @@ the existing shared Python/checkpoint/SHA-256 settings. SoundTouch remains
 available as a separate legacy BPM-only provider.
 
 The existing Auto, Constant and Variable controls remain in use. Explicit
-Constant/Variable uses only its assigned
-analyzer. For Auto with different assignments, the Variable analyzer's
-full-track beats are evaluated with the Auto clock-fit check described below. That
-decision selects the assigned Constant or Variable analyzer, and its result
-is built as the decided grid type. The Constant analyzer is fed audio during
-decoding but is finalized only when Auto decides Constant. Both analyzers
-must initialize successfully. Failures do not silently substitute the other
-analyzer's output or replace an existing grid.
+Constant/Variable uses only its assigned analyzer. Auto first evaluates the
+Variable analyzer's full-track beats with the clock-fit check below. With
+usable percussive audio evidence, it also finalizes the Constant analyzer
+and compares both assigned results against the audio. This validates the
+actual Constant result rather than assuming it has the Variable model's
+tempo. The selected result still comes from its assigned model. Both
+analyzers must initialize successfully. Failures do not silently substitute
+the other analyzer's output or replace an existing grid.
 
-When both assignments are identical, Auto runs that analyzer once and uses
-the existing Auto path. Model assignments, relevant backend versions and
+When both assignments are identical, Auto runs that analyzer once and
+compares its two grid representations. Standalone analyzers use the same
+audio validation and phase correction. Model assignments, backend versions and
 the shared model fingerprint enter the analysis cache identity. A choice
 used only by Variable does not invalidate an explicit Constant result, and
 vice versa. The existing reanalysis preference and BPM locks still apply.
@@ -212,13 +213,11 @@ look identical in beat timestamps. Explicit Variable remains available
 when such edits must be represented. Low-coherence predictions can still
 cause a physically constant song to use a variable grid.
 
-The conservative follow-up changes the Auto analysis identity to `auto:2`
-and the Beat This! backend identity to `3`. Request reanalysis of unlocked
-tracks to replace old results; BPM locks and reanalysis preferences still
-apply. Auto routing continues to inspect the assigned Variable analyzer
-and then selects the assigned Constant or Variable model. In particular,
-the user's Constant=Beat This!, Variable=Queen Mary setup does not require
-finalizing the neural model for tracks that are classified Variable.
+The conservative clock-fit follow-up used `auto:2` and Beat This! backend
+identity `3`. The subsequent audio-validation pass uses `auto:3`,
+`audio_grid_evidence:1` and Custom Models backend `2`. The neural worker and
+checkpoint are unchanged. Request reanalysis of unlocked tracks to replace
+old results; BPM locks and reanalysis preferences still apply.
 
 Fast analysis is available only in Constant mode. Auto and Variable analyze
 the full track even if an old configuration still has fast analysis enabled.
@@ -234,6 +233,98 @@ the disabled dialog returned before populating its selections. It now shows
 the saved provider and grid mode in that state too. This does not establish
 that every reported intermittent reset had that cause. Opening an older Mixxx
 build with the same profile can still overwrite settings it does not support.
+
+## Audio validation and phase correction
+
+The next round adds audio evidence rather than tuning a threshold for each
+recording. `BeatGridEvidence` accumulates an auxiliary mono waveform at about
+1 kHz during decoding. The exact fractional rate is retained, including at
+44.1 kHz. Offline forward/backward low-pass filters at 85, 150 and 300 Hz
+avoid imposing a causal filter delay. Smoothed energy rises identify attacks;
+their time reference lies between the steep rise and its following crest.
+Strengths are normalized against an eight-second local envelope, with a
+track-relative energy floor and 70 ms peak suppression. Silence supplies
+no positive evidence. This is onset evidence, not drum-stem separation.
+
+For each candidate, Gaussian timing tolerances of 12 and 25 ms measure
+supported predicted pulses and strength-weighted onset recall. Their
+harmonic mean prevents a sparse, incorrect 2:3 beat interpretation from
+winning merely because some of its beats coincide with real attacks.
+Scores use the low and broad channels; the intermediate channel corroborates
+small timing corrections. Phase searches consider the supplied beat family
+and its half-beat alternative, with fine offsets limited to 75 ms or 15%
+of a beat, whichever is smaller. Candidate clocks are ranked at their
+attainable phase; translating a grid requires additional evidence.
+
+Auto favors Constant unless Variable improves one of these two scores by
+more than 0.08, or a sustained phase edit requires a map. A usable candidate
+can also replace an unsupported one. With insufficient evidence, the earlier
+clock-only decision remains the fallback. These scores and cutoffs are
+engineering heuristics, not calibrated probabilities or benchmark accuracy.
+
+Fine translations must improve support on both halves of the recording.
+A more conservative correction of at most 10 ms can compensate for the
+50 Hz model's timestamp quantization when two of the three frequency
+channels agree on both halves. Global half-beat changes require a stronger
+score gain and corroboration from low and broad attacks. Existing downbeat
+labels move with the beat lines; no new bar or meter classifier is added.
+
+For longer phase mistakes, a two-state dynamic program evaluates Same/Half
+beat families in 16-second windows, with a switching penalty of 0.08. A
+regional change additionally needs 128 beats of active, corroborating
+evidence. Uncertain windows and silence cannot extend a short fill into a
+supported structural edit. Whole-track half shifts still need whole-track
+corroboration. Supported boundaries are refined against individual attacks
+within the surrounding windows instead of being snapped to 16-second edges.
+When needed, Auto stores the corrected phase regions as a variable map even
+if the tempo elsewhere is steady. The corrected map is evaluated before
+comparing candidate quality. Explicit Constant remains a single-tempo grid;
+explicit Variable bypasses this audio refinement and preserves the selected
+provider's existing variable-grid behavior.
+
+With different model assignments, ambiguous Auto tracks may now require
+both backends to finalize. Constant=Beat This!, Variable=Queen Mary therefore
+can run one neural inference even when the final choice is Variable. This
+adds work relative to the former Queen-Mary-only Variable route. Identical
+assignments still use one inference. There are no new Python requirements,
+checkpoint downloads, per-song rules or model-training steps.
+
+The second supplied set checks these outcomes with Constant=Beat This! and
+Variable=Queen Mary:
+
+| Recording | Grid outcome | Refinement relative to the previous result |
+| --- | --- | --- |
+| Ellen Allien – Yellow Sky | Constant | About 10 ms later |
+| G-Man – Legion [A2] | Variable | Reject the drifting Constant candidate |
+| Jeff Mills – Humana | Constant | About 57 ms later |
+| Lester Fitzpatrick – Tone Control | Constant | 139.64 BPM instead of changing metrical levels |
+| Microworld – Game Over | Variable | Follow the sustained half-beat phase region |
+| Nico – The Wire | Constant | 148.23 BPM instead of roughly 98.84 BPM |
+| Propionic – Bulb | Constant | Use the assigned Constant model at 145.31 BPM |
+| Steve Stoll – Face It | Variable | Correct the half-beat beat-line displacement |
+| Tan ru – Changeling | Variable | Correct the half-beat beat-line displacement |
+
+The small timing shifts are measurements of this audio refinement, not
+independently annotated onset-error statistics. The qualitative notes do
+not specify exact millisecond targets. In particular, Propionic's intro
+phase must be assessed against the intended previous grid: its Auto/Variable
+and manually forced Constant results have different beat positions.
+
+Set `MIXXX_TEST_PHASE_GRID_TRACK_DIRECTORY` to the local fixture directory
+containing the nine named mono `.f32` files and official `*-baseline.json`
+worker outputs. It may also contain the previous six recordings plus HMC
+and Gnosis. `PhaseAndMetricalAudioRegression` runs native Queen Mary,
+replays the cached neural predictions, checks routing and the noted phase
+directions, and writes grid reports and before/after beat times outside
+the repository. With the Python/model environment variables set, the full
+`UploadedCustomModelsChooseConservativeGridTypes` test analyzes every fixture
+through actual model calls, annotation, progress, cache metadata and grid
+serialization. No original audio or private prediction fixtures are committed.
+
+Synthetic ground-truth tests separately exercise fine timing, chunk sizes,
+sample rates, long 44.1 kHz clock accuracy, half-beat labels, offbeat hi-hats,
+short fills, sustained phase edits, non-window-aligned edit boundaries,
+metrical switches, drifting Constant candidates and genuine tempo changes.
 
 ## Conservative Auto regression recordings
 
@@ -359,9 +450,9 @@ with local `hmc.f32`, `gnosis.f32` mono float32 files at 44.1 kHz and their
 `*-baseline.json` model results. Original music files are not included in
 the repository.
 
-Final validation in this environment: the Debug build succeeded; all 1,319
+Final validation in this environment: the Debug build succeeded; all 1,330
 active CTest cases passed, including the real-model integration tests,
-the six complete Custom Models analyses and the supplied-track regressions.
+the 17 complete Custom Models analyses and the supplied-track regressions.
 The 38 existing disabled cases remained disabled; no active test was skipped.
 All 31 installer/worker Python tests, Black, Flake8 and formatting checks
 for the changed C++ files passed.
@@ -373,7 +464,7 @@ These synthetic checks demonstrate integration and regressions, not
 accuracy on a representative music collection. A 4/4 pulse with subdivisions
 can support several metrical interpretations. The neural model also makes
 mistakes; it does not guarantee the intended tempo or musical “1” for every
-track. The six user-labelled cases are now covered, but a broader annotated
+track. The supplied regression cases are now covered, but a broader annotated
 music collection is still needed to assess generalization and genre regressions.
 
 Direct `final0` worker runs on two generated 24-second drum fixtures returned

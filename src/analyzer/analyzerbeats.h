@@ -6,6 +6,7 @@
 
 #include "analyzer/analyzer.h"
 #include "analyzer/plugins/analyzerplugin.h"
+#include "analyzer/plugins/beatgridevidence.h"
 #include "preferences/beatdetectionsettings.h"
 #include "preferences/usersettings.h"
 
@@ -42,6 +43,7 @@ class AnalyzerBeats : public Analyzer {
     BeatDetectionSettings m_bpmSettings;
     const QString m_resourcePath;
     std::unique_ptr<mixxx::AnalyzerBeatsPlugin> m_pPlugin;
+    mixxx::BeatGridEvidence m_audioEvidence;
     const bool m_enforceBpmDetection;
     QString m_pluginId;
     QString m_modelSha256;

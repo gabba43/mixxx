@@ -265,4 +265,28 @@ To remove the installation, remove its prefix, starter symlink and desktop
 entry. Build-mode runtimes, sources and build directories can be removed
 separately. Keep the profile if you want to retain its library and settings.
 
+## Returning to the previous analysis implementation
+
+The tested clock-fit implementation remains available at commit
+`9cf7215c28`. A separate backup branch is not required. To rebuild that
+revision in the managed source directory, close Mixxx and run:
+
+```sh
+git -C "$HOME/.local/share/mixxx-beat-this/source" switch --detach 9cf7215c28
+python3 "$HOME/.local/share/mixxx-beat-this/source/tools/install-linux.py" --no-update
+```
+
+Keep any custom build, runtime, profile and prefix arguments from your
+installation. Do not use `--skip-build` when changing C++ revisions.
+`--no-update` prevents the installer from updating the pinned checkout.
+Python and verified model files can be reused. Changing Git revisions does
+not restore previously saved beatgrids or library data.
+
+To return to the current development branch:
+
+```sh
+git -C "$HOME/.local/share/mixxx-beat-this/source" switch feat/beat-this-variable-tempo
+python3 "$HOME/.local/share/mixxx-beat-this/source/tools/install-linux.py"
+```
+
 <!-- End of autonomously generated text. -->

@@ -110,7 +110,7 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
     };
     addQueenMaryVersion(m_pluginId, &m_extraVersionInfo);
     if (m_pluginId == mixxx::AnalyzerCustomBeats::pluginInfo().id()) {
-        m_extraVersionInfo.insert("custom_backend", "1");
+        m_extraVersionInfo.insert("custom_backend", "2");
         for (const bool constant : {true, false}) {
             if ((constant && m_tempoMode == mixxx::BeatGridMode::Variable) ||
                     (!constant && m_tempoMode == mixxx::BeatGridMode::Constant)) {
@@ -134,6 +134,7 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
              << "\nFast analysis:" << m_bPreferencesFastAnalysis;
 
     m_sampleRate = sampleRate;
+    m_audioEvidence.initialize(sampleRate);
     m_channelCount = channelCount;
     // In fast analysis mode, skip processing after
     // kFastAnalysisSecondsToAnalyze seconds are analyzed.
@@ -160,7 +161,8 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
                                 : nullptr,
                         m_tempoMode != mixxx::BeatGridMode::Constant
                                 ? makePlugin(variableId, mixxx::BeatGridMode::Variable)
-                                : nullptr);
+                                : nullptr,
+                        m_tempoMode == mixxx::BeatGridMode::Auto ? &m_audioEvidence : nullptr);
             }
         } else {
             m_pPlugin = makePlugin(m_pluginId, m_tempoMode);
@@ -308,6 +310,11 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
     }
 
     bool ret = m_pPlugin->processSamples(pBeatInput, count);
+    if (ret && m_tempoMode != mixxx::BeatGridMode::Variable &&
+            m_pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id() &&
+            m_channelCount != mixxx::audio::ChannelCount::mono()) {
+        ret = m_audioEvidence.processSamples(pBeatInput, count);
+    }
     if (pDrumChannel) {
         SampleUtil::free(pDrumChannel);
     }
@@ -332,7 +339,15 @@ void AnalyzerBeats::storeResultsWithProgress(
         return;
     }
 
-    if (!m_pPlugin->finalizeWithProgress(progress)) {
+    if (m_tempoMode != mixxx::BeatGridMode::Variable) {
+        m_audioEvidence.prepare();
+    }
+    const auto pluginProgress = [&progress, this](double value) {
+        if (progress) {
+            progress(value * (m_audioEvidence.hasEvidence() ? 0.85 : 1.0));
+        }
+    };
+    if (!m_pPlugin->finalizeWithProgress(pluginProgress)) {
         qWarning() << "Beat/BPM analysis failed";
         return;
     }
@@ -341,13 +356,43 @@ void AnalyzerBeats::storeResultsWithProgress(
     if (m_pPlugin->supportsBeatTracking()) {
         QVector<mixxx::audio::FramePos> beats = m_pPlugin->getBeats();
         const auto* custom = dynamic_cast<const mixxx::AnalyzerCustomBeats*>(m_pPlugin.get());
-        pBeats = BeatFactory::makePreferredBeats(beats,
-                m_extraVersionInfo,
-                custom ? custom->resolvedTempoMode() : m_tempoMode,
-                m_sampleRate,
-                m_pPlugin->preservesBeatPositions());
-        if (pBeats && !m_pPlugin->getDownbeats().isEmpty()) {
+        const auto prepared = custom ? custom->preparedGrid() : mixxx::BeatsPointer{};
+        pBeats = prepared ? mixxx::Beats::fromByteArray(m_sampleRate,
+                                    prepared->getVersion(),
+                                    BeatFactory::getPreferredSubVersion(m_extraVersionInfo),
+                                    prepared->toByteArray())
+                          : BeatFactory::makePreferredBeats(beats,
+                                    m_extraVersionInfo,
+                                    custom ? custom->resolvedTempoMode() : m_tempoMode,
+                                    m_sampleRate,
+                                    m_pPlugin->preservesBeatPositions());
+        if (pBeats && !prepared && !m_pPlugin->getDownbeats().isEmpty()) {
             pBeats = pBeats->withDownbeats(m_pPlugin->getDownbeats());
+        }
+        if (pBeats && !prepared && m_tempoMode != mixxx::BeatGridMode::Variable) {
+            if (m_tempoMode == mixxx::BeatGridMode::Auto && m_audioEvidence.hasEvidence()) {
+                const auto makeCandidate = [&](bool constant) {
+                    if (pBeats->hasConstantTempo() == constant) {
+                        return pBeats;
+                    }
+                    auto candidate = BeatFactory::makePreferredBeats(beats,
+                            m_extraVersionInfo,
+                            constant,
+                            m_sampleRate,
+                            m_pPlugin->preservesBeatPositions());
+                    return candidate && !m_pPlugin->getDownbeats().isEmpty()
+                            ? candidate->withDownbeats(m_pPlugin->getDownbeats())
+                            : candidate;
+                };
+                const auto constant = m_audioEvidence.evaluate(makeCandidate(true), true);
+                const auto variable = m_audioEvidence.evaluate(makeCandidate(false), true);
+                pBeats = mixxx::BeatGridEvidence::preferConstant(
+                                 constant, variable, pBeats->hasConstantTempo())
+                        ? constant.grid
+                        : variable.grid;
+            } else {
+                pBeats = m_audioEvidence.evaluate(pBeats, false).grid;
+            }
         }
         qDebug() << "AnalyzerBeats plugin detected" << beats.size()
                  << "beats. Predominant BPM:"
@@ -368,6 +413,9 @@ void AnalyzerBeats::storeResultsWithProgress(
     } else {
         qWarning() << "Beat/BPM analysis produced no usable grid";
     }
+    if (progress) {
+        progress(1.0);
+    }
 }
 
 // static
@@ -379,7 +427,11 @@ QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
     QHash<QString, QString> extraVersionInfo;
     extraVersionInfo["vamp_plugin_id"] = pluginId;
     if (mode == mixxx::BeatGridMode::Auto) {
-        extraVersionInfo["tempo_mode"] = "auto:2";
+        extraVersionInfo["tempo_mode"] = "auto:3";
+    }
+    if (mode != mixxx::BeatGridMode::Variable &&
+            pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
+        extraVersionInfo["audio_grid_evidence"] = "1";
     }
     if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
         extraVersionInfo["beat_tracker_version"] = "3";
