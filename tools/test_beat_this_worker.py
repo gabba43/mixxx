@@ -323,10 +323,64 @@ class ServerProtocolTests(unittest.TestCase):
         for identifier in ["first", "second"]:
             job = [x for x in messages if x.get("id") == identifier]
             self.assertEqual(
-                ["progress", "progress", "result"], [x["type"] for x in job]
+                ["accepted", "progress", "progress", "result"],
+                [x["type"] for x in job],
             )
-            self.assertEqual([0.1, 1.0], [x["progress"] for x in job[:-1]])
+            self.assertEqual(
+                [0.1, 1.0],
+                [x["progress"] for x in job if x["type"] == "progress"],
+            )
             self.assertEqual(1, job[-1]["result"]["version"])
+
+    def test_receipt_is_acknowledged_before_runtime_validation(self):
+        output = io.StringIO()
+        observed = []
+
+        class InspectingRuntime(FakeRuntime):
+            def analyze(self, *args):
+                observed.append(
+                    [
+                        json.loads(line)
+                        for line in output.getvalue().splitlines()
+                    ]
+                )
+                return super().analyze(*args)
+
+        request = self.request("missing", audio=str(self.root / "missing.f32"))
+        code = worker.serve(
+            SimpleNamespace(checkpoint=self.checkpoint, sha256=self.digest),
+            input_stream=io.StringIO(json.dumps(request) + "\n"),
+            output_stream=output,
+            runtime_factory=InspectingRuntime,
+        )
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(observed))
+        self.assertEqual(
+            ["ready", "accepted"], [x["type"] for x in observed[0]]
+        )
+        messages = [
+            json.loads(line) for line in output.getvalue().splitlines()
+        ]
+        self.assertEqual(
+            ["ready", "accepted", "error"], [x["type"] for x in messages]
+        )
+        self.assertEqual("missing", messages[1]["id"])
+        self.assertEqual("missing", messages[2]["id"])
+        self.assertFalse(messages[2].get("fatal", False))
+
+    def test_acknowledged_invalid_request_keeps_worker_reusable(self):
+        code, messages = self.transact(
+            [self.request("invalid", frames=0), self.request("valid")]
+        )
+        self.assertEqual(0, code)
+        invalid = [x for x in messages if x.get("id") == "invalid"]
+        self.assertEqual(["accepted", "error"], [x["type"] for x in invalid])
+        self.assertFalse(invalid[-1].get("fatal", False))
+        valid = [x for x in messages if x.get("id") == "valid"]
+        self.assertEqual(
+            ["accepted", "progress", "progress", "result"],
+            [x["type"] for x in valid],
+        )
 
     def test_malformed_requests_and_failed_job_do_not_poison_next_job(self):
         bad_audio = self.root / "bad.f32"
@@ -373,7 +427,10 @@ class ServerProtocolTests(unittest.TestCase):
         )
         self.assertEqual("", errors)
         self.assertEqual(1, process.returncode)
-        message = json.loads(output)
+        messages = [json.loads(line) for line in output.splitlines()]
+        self.assertEqual(["accepted", "error"], [x["type"] for x in messages])
+        self.assertEqual("changed", messages[0]["id"])
+        message = messages[-1]
         self.assertEqual("error", message["type"])
         self.assertEqual("changed", message["id"])
         self.assertIn("Checkpoint changed", message["error"])

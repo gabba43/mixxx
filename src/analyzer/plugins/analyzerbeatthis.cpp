@@ -79,7 +79,12 @@ class BeatThisSession {
         key.clear();
         pending.clear();
     }
-    bool readMessage(QJsonObject* message, QElapsedTimer* timer, int timeout) {
+    bool readMessage(QJsonObject* message,
+            QElapsedTimer* timer,
+            int timeout,
+            bool* timedOut = nullptr) {
+        if (timedOut)
+            *timedOut = false;
         while (!stopping() && timer->elapsed() < timeout) {
             pending += process.read(kMaximumMessage - pending.size() + 1);
             errors.append(process.readAllStandardError());
@@ -100,6 +105,8 @@ class BeatThisSession {
                 return false;
             process.waitForReadyRead(100);
         }
+        if (timedOut)
+            *timedOut = !stopping() && timer->elapsed() >= timeout;
         return false;
     }
     bool analyze(const mixxx::AnalyzerBeatThis::Options& options,
@@ -109,7 +116,9 @@ class BeatThisSession {
             const AnalyzerProgressCallback& progress,
             QByteArray* result,
             QJsonObject* timings,
-            QJsonObject* diagnostics) {
+            QJsonObject* diagnostics,
+            bool* unacknowledged) {
+        *unacknowledged = false;
         QElapsedTimer total;
         total.start();
         const auto identity = QJsonDocument(QJsonArray{fileIdentity(options.python),
@@ -117,6 +126,11 @@ class BeatThisSession {
                                                     fileIdentity(options.checkpoint),
                                                     options.sha256.toLower()})
                                       .toJson(QJsonDocument::Compact);
+        if (unresponsiveKey == identity) {
+            *unacknowledged = true;
+            return false;
+        }
+        unresponsiveKey.clear();
         const bool reused = process.state() == QProcess::Running && key == identity;
         double lastProgress = 0;
         if (!reused) {
@@ -181,20 +195,55 @@ class BeatThisSession {
         if (stopping() || process.write(request) != request.size())
             return fail("request write");
         qDebug() << "Beat This! worker job queued" << id << "frames" << frames;
+        const int acknowledgementDeadline =
+                std::min(options.requestAckTimeoutMs, options.requestTimeoutMs);
+        while (process.bytesToWrite() > 0) {
+            if (stopping() || process.state() != QProcess::Running ||
+                    requestTimer.elapsed() >= acknowledgementDeadline) {
+                return fail("request delivery cancelled or timed out");
+            }
+            process.waitForBytesWritten(static_cast<int>(std::clamp<qint64>(
+                    acknowledgementDeadline - requestTimer.elapsed(), 0, 100)));
+        }
+        qDebug() << "Beat This! worker job delivered" << id;
+        bool acknowledged = false;
         for (;;) {
             QJsonObject message;
-            if (!readMessage(&message, &requestTimer, options.requestTimeoutMs) ||
-                    message.value("id").toString() != id) {
+            bool timedOut = false;
+            if (!readMessage(&message,
+                        &requestTimer,
+                        acknowledged ? options.requestTimeoutMs : acknowledgementDeadline,
+                        &timedOut)) {
+                if (!acknowledged && timedOut && !stopping() &&
+                        process.state() == QProcess::Running &&
+                        requestTimer.elapsed() < options.requestTimeoutMs &&
+                        options.requestAckTimeoutMs < options.requestTimeoutMs) {
+                    unresponsiveKey = identity;
+                    *unacknowledged = true;
+                    fail("worker did not acknowledge delivered request");
+                    timings->insert("persistent_unacknowledged_wait",
+                            static_cast<double>(requestTimer.elapsed()));
+                    return false;
+                }
+                return fail("cancelled, timeout, process crash or invalid reply");
+            }
+            if (message.value("id").toString() != id) {
                 return fail("cancelled, timeout, process crash or invalid reply");
             }
             const auto type = message.value("type").toString();
-            if (type == "progress") {
+            if (type == "accepted") {
+                if (acknowledged)
+                    return fail("duplicate request acknowledgement");
+                acknowledged = true;
+                qDebug() << "Beat This! worker job accepted" << id;
+            } else if (type == "progress") {
                 const auto entry = message.value("progress");
                 const double value = entry.toDouble(-1);
                 if (!entry.isDouble() || !std::isfinite(value) ||
                         value < lastProgress || value > 1 || value < 0) {
                     return fail("invalid progress");
                 }
+                acknowledged = true;
                 lastProgress = value;
                 qDebug() << "Beat This! worker job progress" << id << value;
                 if (progress)
@@ -236,6 +285,7 @@ class BeatThisSession {
     }
     QProcess process;
     QByteArray key;
+    QByteArray unresponsiveKey;
     QByteArray pending;
     QByteArray errors;
     quint64 nextJob = 0;
@@ -269,7 +319,7 @@ bool AnalyzerBeatThis::initialize(audio::SampleRate sampleRate) {
             python.isEmpty() || !QFileInfo(m_options.script).isFile() ||
             !QFileInfo(m_options.checkpoint).isFile() ||
             m_options.sha256.size() != 64 || m_options.requestTimeoutMs <= 0 ||
-            m_options.startupTimeoutMs <= 0) {
+            m_options.startupTimeoutMs <= 0 || m_options.requestAckTimeoutMs <= 0) {
         qWarning() << "Beat This! requires a Python runtime, script, local "
                       "checkpoint and SHA-256";
         return false;
@@ -325,29 +375,52 @@ bool AnalyzerBeatThis::finalizeWithProgress(
     m_audio.close();
     m_diagnostics.insert("pcm_bytes", static_cast<double>(m_frames * sizeof(float)));
     m_diagnostics.insert("pcm_sample_rate", static_cast<int>(m_sampleRate.value()));
+    QElapsedTimer workerTimer;
+    workerTimer.start();
+    double reportedProgress = 0;
+    const auto forwardProgress = [&](double value) {
+        reportedProgress = std::max(reportedProgress, value);
+        if (progress)
+            progress(reportedProgress);
+    };
+    int requestTimeoutMs = m_options.requestTimeoutMs;
     if (m_options.persistent) {
         if (!s_session)
             s_session = std::make_unique<BeatThisSession>();
         QByteArray json;
+        bool unacknowledged = false;
         const bool completed = s_session->analyze(m_options,
                 audioPath,
                 m_sampleRate.value(),
                 m_frames,
-                progress,
+                forwardProgress,
                 &json,
                 &m_timings,
-                &m_diagnostics);
-        m_audio.remove();
-        const bool parsed = completed &&
-                parseResults(json,
-                        m_options.sha256,
-                        m_sampleRate,
-                        m_frames,
-                        &m_beats,
-                        &m_downbeats);
-        if (completed && !parsed)
-            s_session->stop();
-        return parsed;
+                &m_diagnostics,
+                &unacknowledged);
+        if (!unacknowledged || stopping()) {
+            m_audio.remove();
+            const bool parsed = completed &&
+                    parseResults(json,
+                            m_options.sha256,
+                            m_sampleRate,
+                            m_frames,
+                            &m_beats,
+                            &m_downbeats);
+            if (completed && !parsed)
+                s_session->stop();
+            return parsed;
+        }
+        requestTimeoutMs -= static_cast<int>(
+                m_timings.value("persistent_unacknowledged_wait").toDouble());
+        if (requestTimeoutMs <= 0) {
+            m_audio.remove();
+            return false;
+        }
+        m_diagnostics.insert("worker_transport_fallback", true);
+        m_diagnostics.remove("worker_pid");
+        qWarning() << "Beat This! persistent request was not acknowledged; "
+                      "retrying the same audio/model with one-shot transport";
     }
     QProcess process;
     process.setProgram(m_options.python);
@@ -361,10 +434,10 @@ bool AnalyzerBeatThis::finalizeWithProgress(
             m_options.checkpoint,
             "--sha256",
             m_options.sha256});
-    process.start();
-    const bool started = process.waitForStarted(10000);
     QElapsedTimer timer;
     timer.start();
+    process.start();
+    const bool started = process.waitForStarted(std::min(10000, requestTimeoutMs));
     QByteArray pendingError;
     QByteArray errorOutput;
     double lastProgress = 0;
@@ -382,9 +455,7 @@ bool AnalyzerBeatThis::finalizeWithProgress(
                 if (valid && std::isfinite(value) && value >= lastProgress &&
                         value <= 1) {
                     lastProgress = value;
-                    if (progress) {
-                        progress(value);
-                    }
+                    forwardProgress(value);
                 }
             } else {
                 errorOutput.append(line).append('\n');
@@ -400,7 +471,7 @@ bool AnalyzerBeatThis::finalizeWithProgress(
         outputTooLarge = standardOutput.size() > kMaximumMessage;
     };
     while (started && process.state() != QProcess::NotRunning &&
-            timer.elapsed() < m_options.requestTimeoutMs && !stopping() && !outputTooLarge) {
+            timer.elapsed() < requestTimeoutMs && !stopping() && !outputTooLarge) {
         process.waitForFinished(200);
         consumeError();
         consumeOutput();
@@ -427,7 +498,7 @@ bool AnalyzerBeatThis::finalizeWithProgress(
     const auto output = std::move(standardOutput);
     const auto metadata = QJsonDocument::fromJson(output).object();
     workerTimings(metadata.value("timings").toObject(), &m_timings);
-    m_timings.insert("worker_total", static_cast<double>(timer.elapsed()));
+    m_timings.insert("worker_total", static_cast<double>(workerTimer.elapsed()));
     if (metadata.value("peak_rss_bytes").isDouble()) {
         m_diagnostics.insert("worker_peak_rss_bytes", metadata.value("peak_rss_bytes"));
     }

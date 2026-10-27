@@ -114,6 +114,7 @@ class BeatThisWorkerTest : public MixxxTest {
         ASSERT_TRUE(m_directory.isValid());
         ASSERT_TRUE(writeFile(checkpoint(), "test checkpoint"));
         ASSERT_TRUE(writeFile(script(), R"PY(import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -131,6 +132,8 @@ args = parser.parse_args()
 root = Path(__file__).parent
 with (root / 'starts.log').open('a') as log:
     log.write(str(os.getpid()) + '\n')
+with (root / 'transports.log').open('a') as log:
+    log.write(('persistent' if args.serve else 'oneshot') + '\n')
 
 def mode():
     path = root / 'mode.txt'
@@ -144,12 +147,21 @@ def result():
             'beats': [0.1, 0.6, 1.1, 1.6], 'downbeats': [0.1]}
 
 if not args.serve:
+    audio = Path(args.audio)
+    with (root / 'oneshot.log').open('a') as log:
+        log.write(json.dumps({'audio': str(audio), 'sample_rate': args.sample_rate,
+                              'frames': audio.stat().st_size // 4,
+                              'model_sha256': args.sha256,
+                              'pcm_sha256': hashlib.sha256(audio.read_bytes()).hexdigest()}) + '\n')
+    print('MIXXX_BEAT_THIS_PROGRESS 0.01', file=sys.stderr, flush=True)
     print('MIXXX_BEAT_THIS_PROGRESS 0.2', file=sys.stderr, flush=True)
     print('MIXXX_BEAT_THIS_PROGRESS 1.0', file=sys.stderr, flush=True)
     emit(result())
     sys.exit(0)
 
 startup_mode = mode()
+if startup_mode == 'silent_after_startup_progress':
+    emit({'protocol': 2, 'type': 'startup_progress', 'progress': 0.1})
 if startup_mode in ('startup_progress', 'startup_hang'):
     emit({'protocol': 2, 'type': 'startup_progress', 'progress': 0.01})
     deadline = time.monotonic() + 2
@@ -185,9 +197,19 @@ for line in sys.stdin:
     if request.get('type') == 'shutdown':
         break
     with (root / 'requests.log').open('a') as log:
-        log.write(json.dumps(dict(request, pid=os.getpid())) + '\n')
+        pcm_sha256 = hashlib.sha256(Path(request['audio']).read_bytes()).hexdigest()
+        log.write(json.dumps(dict(request, pid=os.getpid(), pcm_sha256=pcm_sha256)) + '\n')
     job_id = request['id']
     selected = mode()
+    if selected in ('silent_request', 'silent_after_startup_progress'):
+        time.sleep(30)
+        continue
+    if selected in ('accepted_slow_progress', 'accepted_hang'):
+        emit({'protocol': 2, 'type': 'accepted', 'id': job_id})
+        time.sleep(30 if selected == 'accepted_hang' else 0.2)
+    if selected == 'wrong_accepted_id':
+        emit({'protocol': 2, 'type': 'accepted', 'id': job_id + '-old'})
+        continue
     if selected == 'crash':
         os._exit(7)
     if selected == 'oversize':
@@ -282,7 +304,9 @@ for line in sys.stdin:
         return lines(QStringLiteral("starts.log")).size();
     }
     void expectTemporaryAudioRemoved() const {
-        for (const auto& line : lines(QStringLiteral("requests.log"))) {
+        const auto requests = lines(QStringLiteral("requests.log")) +
+                lines(QStringLiteral("oneshot.log"));
+        for (const auto& line : requests) {
             const auto audio = QJsonDocument::fromJson(line).object().value("audio").toString();
             EXPECT_FALSE(audio.isEmpty());
             EXPECT_FALSE(QFileInfo::exists(audio));
@@ -409,6 +433,7 @@ TEST_F(BeatThisWorkerTest, ModelScriptAndConfiguredIdentityChangesRestartTheWork
 TEST_F(BeatThisWorkerTest, CorruptProtocolCannotReturnOrReuseStaleResults) {
     for (const auto& mode : {QByteArray("malformed"),
                  QByteArray("wrong_version"),
+                 QByteArray("wrong_accepted_id"),
                  QByteArray("stale_id"),
                  QByteArray("unknown_type"),
                  QByteArray("invalid_progress"),
@@ -636,6 +661,155 @@ TEST_F(BeatThisWorkerTest, ParallelAnalysisThreadsKeepIndependentLoadedWorkers) 
     expectSuccessful(outcomes[1]);
     EXPECT_NE(pid(outcomes[0]), pid(outcomes[1]));
     EXPECT_EQ(2, starts());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, UnacknowledgedRequestRetriesIdenticalAudioWithOneShot) {
+    setMode("silent_after_startup_progress");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 100;
+    deadline.requestTimeoutMs = 3000;
+    const auto outcome = runWorkerJob(deadline);
+    expectSuccessful(outcome);
+    EXPECT_TRUE(outcome.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_FALSE(outcome.diagnostics.value("worker_reused").toBool());
+    EXPECT_FALSE(outcome.diagnostics.contains("worker_pid"));
+    EXPECT_EQ(2, starts());
+    EXPECT_EQ((QList<QByteArray>{"persistent", "oneshot"}),
+            lines(QStringLiteral("transports.log")));
+    const auto requests = lines(QStringLiteral("requests.log"));
+    const auto retries = lines(QStringLiteral("oneshot.log"));
+    ASSERT_EQ(1, requests.size());
+    ASSERT_EQ(1, retries.size());
+    const auto request = QJsonDocument::fromJson(requests.front()).object();
+    const auto retry = QJsonDocument::fromJson(retries.front()).object();
+    for (const auto* field : {"audio", "frames", "sample_rate", "pcm_sha256"}) {
+        EXPECT_EQ(request.value(field), retry.value(field)) << field;
+    }
+    EXPECT_EQ(QString(64, 'a'), retry.value("model_sha256").toString());
+    ASSERT_FALSE(outcome.progress.isEmpty());
+    EXPECT_DOUBLE_EQ(0.1, outcome.progress.front());
+    EXPECT_TRUE(std::is_sorted(outcome.progress.begin(), outcome.progress.end()));
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, UnresponsiveTransportIsBypassedUntilItsIdentityChanges) {
+    setMode("silent_request");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 100;
+    const auto first = runWorkerJob(deadline);
+    expectSuccessful(first);
+    EXPECT_TRUE(first.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_EQ(2, starts());
+    setMode("normal");
+    const auto next = runWorkerJob(deadline);
+    expectSuccessful(next);
+    EXPECT_TRUE(next.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_EQ(3, starts());
+    EXPECT_EQ((QList<QByteArray>{"persistent", "oneshot", "oneshot"}),
+            lines(QStringLiteral("transports.log")));
+    QFile source(script());
+    ASSERT_TRUE(source.open(QIODevice::Append));
+    ASSERT_GT(source.write("\n# changed script identity after recovery\n"), 0);
+    source.close();
+    const auto recovered = runWorkerJob(deadline);
+    expectSuccessful(recovered);
+    EXPECT_FALSE(recovered.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_GT(pid(recovered), 0);
+    EXPECT_EQ(4, starts());
+    EXPECT_EQ(QByteArray("persistent"), lines(QStringLiteral("transports.log")).back());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, AcceptedJobMayTakeLongerThanTheAcknowledgmentDeadline) {
+    setMode("accepted_slow_progress");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 100;
+    const auto outcome = runWorkerJob(deadline);
+    expectSuccessful(outcome);
+    EXPECT_FALSE(outcome.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_EQ(1, starts());
+    EXPECT_TRUE(lines(QStringLiteral("oneshot.log")).isEmpty());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, AcceptedInferenceTimeoutDoesNotRetryTheJob) {
+    setMode("accepted_hang");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 100;
+    deadline.requestTimeoutMs = 300;
+    const auto outcome = runWorkerJob(deadline);
+    EXPECT_FALSE(outcome.finalized);
+    EXPECT_TRUE(outcome.beats.isEmpty());
+    EXPECT_FALSE(outcome.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_EQ(1, starts());
+    EXPECT_TRUE(lines(QStringLiteral("oneshot.log")).isEmpty());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, OverallRequestDeadlineDoesNotTriggerTransportRetry) {
+    setMode("silent_request");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 300;
+    deadline.requestTimeoutMs = 100;
+    const auto outcome = runWorkerJob(deadline);
+    EXPECT_FALSE(outcome.finalized);
+    EXPECT_TRUE(outcome.beats.isEmpty());
+    EXPECT_FALSE(outcome.diagnostics.value("worker_transport_fallback").toBool());
+    EXPECT_EQ(1, starts());
+    EXPECT_TRUE(lines(QStringLiteral("oneshot.log")).isEmpty());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, CancellationWhileAwaitingAcknowledgmentDoesNotRetry) {
+    setMode("silent_request");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 5000;
+    CancelledWorkerJob thread(deadline);
+    thread.start();
+    QElapsedTimer wait;
+    wait.start();
+    while (lines(QStringLiteral("requests.log")).isEmpty() && wait.elapsed() < 5000) {
+        QThread::msleep(10);
+    }
+    const bool requested = !lines(QStringLiteral("requests.log")).isEmpty();
+    thread.stop();
+    ASSERT_TRUE(thread.wait(6000));
+    EXPECT_TRUE(requested);
+    EXPECT_FALSE(thread.outcome().finalized);
+    EXPECT_TRUE(thread.outcome().beats.isEmpty());
+    EXPECT_EQ(1, starts());
+    EXPECT_TRUE(lines(QStringLiteral("oneshot.log")).isEmpty());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, ParallelThreadsRecoverWithoutSharingWorkersOrAudio) {
+    setMode("silent_request");
+    auto deadline = options();
+    deadline.requestAckTimeoutMs = 100;
+    WorkerOutcome outcomes[2];
+    const auto run = [&](int index) {
+        outcomes[index] = runWorkerJob(deadline);
+        AnalyzerBeatThis::shutdownWorkerForCurrentThread();
+    };
+    std::unique_ptr<QThread> first(QThread::create([&] { run(0); }));
+    std::unique_ptr<QThread> second(QThread::create([&] { run(1); }));
+    first->start();
+    second->start();
+    ASSERT_TRUE(first->wait(10000));
+    ASSERT_TRUE(second->wait(10000));
+    for (const auto& outcome : outcomes) {
+        expectSuccessful(outcome);
+        EXPECT_TRUE(outcome.diagnostics.value("worker_transport_fallback").toBool());
+    }
+    EXPECT_EQ(4, starts());
+    const auto requests = lines(QStringLiteral("requests.log"));
+    ASSERT_EQ(2, requests.size());
+    const auto firstRequest = QJsonDocument::fromJson(requests[0]).object();
+    const auto secondRequest = QJsonDocument::fromJson(requests[1]).object();
+    EXPECT_NE(firstRequest.value("pid"), secondRequest.value("pid"));
+    EXPECT_NE(firstRequest.value("audio"), secondRequest.value("audio"));
+    EXPECT_EQ(2, lines(QStringLiteral("oneshot.log")).size());
     expectTemporaryAudioRemoved();
 }
 

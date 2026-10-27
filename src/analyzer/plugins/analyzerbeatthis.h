@@ -17,6 +17,7 @@ class AnalyzerBeatThis final : public AnalyzerBeatsPlugin {
         bool persistent = true;
         int requestTimeoutMs = 600000;
         int startupTimeoutMs = 60000;
+        int requestAckTimeoutMs = 3000;
     };
 
     static AnalyzerPluginInfo pluginInfo() {

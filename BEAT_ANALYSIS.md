@@ -62,13 +62,24 @@ Audio is downmixed to mono and streamed into a temporary float32 file;
 no audio is uploaded. Mixxx does not download models or install Python
 packages during analysis. One persistent process per analysis thread imports
 Python and loads the model once, then accepts sequential jobs. Startup has a
-60-second limit and each job a 10-minute limit. Cancellation kills the active
+60-second limit and each job a 10-minute limit. Mixxx explicitly drains the
+request's write buffer, and the worker immediately acknowledges receipt before
+checking the audio. A running worker that does not acknowledge a delivered
+request within three seconds is stopped. The same audio and verified model are
+then retried through the existing one-shot CLI within the remaining job budget.
+This does not select another analysis model or change the predictions.
+Later jobs on that analysis thread keep using one-shot transport until the
+runtime/script/checkpoint identity changes or the thread ends; healthy workers
+retain normal model reuse. This recovery does not reduce analysis parallelism,
+but affected threads pay model startup cost per track. Once receipt or valid
+progress is confirmed, the normal inference deadline applies without a retry.
+Cancellation kills the active
 worker; the next job can start a fresh process. The analyzer commits results only after successful
 validation; a failed run leaves any grid still present on the track untouched.
 
 The process uses protocol 2 UTF-8 JSON lines: optional `startup_progress` messages,
-a verified `ready` handshake, job IDs, progress, a nested version-1 result, and
-recoverable or fatal errors. Startup progress covers checkpoint verification,
+a verified `ready` handshake, job IDs, an `accepted` receipt, progress, a nested
+version-1 result, and recoverable or fatal errors. Startup progress covers checkpoint verification,
 Python imports and model loading; it does not extend the startup deadline.
 Custom Models also reports completion of the first model when that backend
 has no incremental progress callback, so the display does not remain at the

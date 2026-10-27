@@ -285,6 +285,7 @@ def serve(args, input_stream=None, output_stream=None, runtime_factory=None):
             if identifier in used_ids:
                 raise ValueError("Duplicate request id")
             used_ids.add(identifier)
+            emit("accepted", id=identifier)
             if (
                 not isinstance(request.get("audio"), str)
                 or not Path(request["audio"]).is_absolute()
