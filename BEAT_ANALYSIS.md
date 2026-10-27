@@ -66,8 +66,14 @@ Python and loads the model once, then accepts sequential jobs. Startup has a
 worker; the next job can start a fresh process. The analyzer commits results only after successful
 validation; a failed run leaves any grid still present on the track untouched.
 
-The process uses protocol 2 UTF-8 JSON lines: a verified `ready` handshake, job IDs,
-progress, a nested version-1 result, and recoverable or fatal errors. Requests
+The process uses protocol 2 UTF-8 JSON lines: optional `startup_progress` messages,
+a verified `ready` handshake, job IDs, progress, a nested version-1 result, and
+recoverable or fatal errors. Startup progress covers checkpoint verification,
+Python imports and model loading; it does not extend the startup deadline.
+Custom Models also reports completion of the first model when that backend
+has no incremental progress callback, so the display does not remain at the
+50% decoding boundary during the second model's startup. Parallel analysis
+and persistent worker reuse are unchanged. Requests
 are limited to 64 KiB and responses to 8 MiB. Replies with the wrong ID, invalid
 positions, malformed progress or a protocol mismatch are rejected. Crashes,
 timeouts and fatal errors discard the session; ordinary invalid jobs can leave

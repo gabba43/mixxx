@@ -22,6 +22,9 @@
 #include <vector>
 
 #include "analyzer/plugins/analyzerbeatthis.h"
+#include "analyzer/plugins/analyzercustombeats.h"
+#include "analyzer/plugins/analyzerqueenmarybeats.h"
+#include "analyzer/plugins/beatgridevidence.h"
 #include "preferences/beatdetectionsettings.h"
 #include "test/mixxxtest.h"
 #include "util/workerthread.h"
@@ -147,6 +150,31 @@ if not args.serve:
     sys.exit(0)
 
 startup_mode = mode()
+if startup_mode in ('startup_progress', 'startup_hang'):
+    emit({'protocol': 2, 'type': 'startup_progress', 'progress': 0.01})
+    deadline = time.monotonic() + 2
+    while not (root / 'startup-progress-ack').exists():
+        if time.monotonic() >= deadline:
+            sys.exit(8)
+        time.sleep(0.01)
+    emit({'protocol': 2, 'type': 'startup_progress', 'progress': 0.05})
+    emit({'protocol': 2, 'type': 'startup_progress', 'progress': 0.1})
+if startup_mode == 'startup_hang':
+    time.sleep(30)
+if startup_mode == 'startup_timeout':
+    for _ in range(100):
+        emit({'protocol': 2, 'type': 'startup_progress', 'progress': 0.01})
+        time.sleep(0.03)
+if startup_mode.startswith('bad_startup_'):
+    values = {
+        'bad_startup_negative': [-0.01],
+        'bad_startup_large': [0.11],
+        'bad_startup_bool': [True],
+        'bad_startup_string': ['0.05'],
+        'bad_startup_backwards': [0.05, 0.01],
+    }
+    for value in values[startup_mode]:
+        emit({'protocol': 2, 'type': 'startup_progress', 'progress': value})
 emit({'protocol': 99 if startup_mode == 'bad_ready_version' else 2,
       'type': 'ready',
       'model_sha256': '0' * 64 if startup_mode == 'bad_ready_hash' else args.sha256,
@@ -403,6 +431,135 @@ TEST_F(BeatThisWorkerTest, CorruptProtocolCannotReturnOrReuseStaleResults) {
         EXPECT_NE(pid(first), pid(next));
         EXPECT_EQ(previousStarts + 1, starts());
     }
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, SlowStartupReportsProgressBeforeTheWorkerIsReady) {
+    setMode("startup_progress");
+    bool startupReported = false;
+    const auto outcome = runWorkerJob(options(), [&](double value) {
+        if (value == 0.01) {
+            startupReported = true;
+            EXPECT_TRUE(lines(QStringLiteral("requests.log")).isEmpty());
+            EXPECT_TRUE(writeFile(
+                    m_directory.filePath(QStringLiteral("startup-progress-ack")), "ready"));
+        }
+    });
+    expectSuccessful(outcome);
+    EXPECT_TRUE(startupReported);
+    ASSERT_GE(outcome.progress.size(), 3);
+    EXPECT_DOUBLE_EQ(0.01, outcome.progress[0]);
+    EXPECT_DOUBLE_EQ(0.05, outcome.progress[1]);
+    EXPECT_DOUBLE_EQ(0.1, outcome.progress[2]);
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, AutoModeReportsQueenMaryCompletionBeforeBeatThisStartup) {
+    setMode("startup_progress");
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kWorkerTestRate);
+    auto variable = std::make_unique<mixxx::AnalyzerQueenMaryBeats>(mixxx::BeatGridMode::Variable);
+    const auto* queenMary = variable.get();
+    mixxx::AnalyzerCustomBeats analyzer(mixxx::BeatGridMode::Auto,
+            std::make_unique<AnalyzerBeatThis>(options()),
+            std::move(variable),
+            &evidence);
+    ASSERT_TRUE(analyzer.initialize(kWorkerTestRate));
+    constexpr int kSeconds = 24;
+    constexpr int kRate = 44100;
+    std::vector<CSAMPLE> samples(kSeconds * kRate * 2, 0.0f);
+    for (int beat = 0; beat < kSeconds * 2; ++beat) {
+        const int first = static_cast<int>(std::lround((0.1 + beat * 0.5) * kRate));
+        for (int frame = 0; frame < kRate / 8 && first + frame < kSeconds * kRate; ++frame) {
+            const double time = frame / static_cast<double>(kRate);
+            const auto pulse = static_cast<CSAMPLE>((beat % 4 == 0 ? 0.9 : 0.6) *
+                    std::exp(-80 * time) * std::cos(2 * M_PI * 80 * time));
+            samples[2 * (first + frame)] = samples[2 * (first + frame) + 1] = pulse;
+        }
+    }
+    for (size_t first = 0; first < samples.size(); first += 8192) {
+        const auto count = static_cast<SINT>(std::min(size_t(8192), samples.size() - first));
+        ASSERT_TRUE(analyzer.processSamples(samples.data() + first, count));
+        ASSERT_TRUE(evidence.processSamples(samples.data() + first, count));
+    }
+    evidence.prepare();
+    ASSERT_TRUE(evidence.hasEvidence());
+    bool variableFinished = false;
+    bool startupReported = false;
+    QVector<double> progress;
+    const bool finalized = analyzer.finalizeWithProgress([&](double value) {
+        progress.push_back(value);
+        if (value == 0.5 && !startupReported) {
+            variableFinished = true;
+            EXPECT_GE(queenMary->getBeats().size(), 2);
+            EXPECT_EQ(0, starts());
+            EXPECT_TRUE(lines(QStringLiteral("requests.log")).isEmpty());
+        }
+        if (std::abs(value - 0.505) < 1e-10) {
+            startupReported = true;
+            EXPECT_TRUE(variableFinished);
+            EXPECT_EQ(1, starts());
+            EXPECT_TRUE(lines(QStringLiteral("requests.log")).isEmpty());
+            EXPECT_TRUE(writeFile(
+                    m_directory.filePath(QStringLiteral("startup-progress-ack")), "ready"));
+        }
+    });
+    ASSERT_TRUE(finalized);
+    EXPECT_TRUE(variableFinished);
+    EXPECT_TRUE(startupReported);
+    EXPECT_TRUE(std::is_sorted(progress.begin(), progress.end()));
+    EXPECT_DOUBLE_EQ(1.0, progress.back());
+    expectTemporaryAudioRemoved();
+}
+
+TEST_F(BeatThisWorkerTest, InvalidStartupProgressIsRejectedBeforeSendingAudio) {
+    for (const auto& mode : {QByteArray("bad_startup_negative"),
+                 QByteArray("bad_startup_large"),
+                 QByteArray("bad_startup_bool"),
+                 QByteArray("bad_startup_string"),
+                 QByteArray("bad_startup_backwards")}) {
+        SCOPED_TRACE(mode.toStdString());
+        setMode(mode);
+        const auto failed = runWorkerJob(options());
+        EXPECT_FALSE(failed.finalized);
+        EXPECT_TRUE(failed.beats.isEmpty());
+        EXPECT_TRUE(lines(QStringLiteral("requests.log")).isEmpty());
+    }
+    setMode("normal");
+    expectSuccessful(runWorkerJob(options()));
+}
+
+TEST_F(BeatThisWorkerTest, StartupProgressDoesNotExtendTheStartupDeadline) {
+    setMode("startup_timeout");
+    auto deadline = options();
+    deadline.startupTimeoutMs = 150;
+    QElapsedTimer timer;
+    timer.start();
+    const auto failed = runWorkerJob(deadline);
+    EXPECT_FALSE(failed.finalized);
+    EXPECT_TRUE(failed.beats.isEmpty());
+    EXPECT_TRUE(lines(QStringLiteral("requests.log")).isEmpty());
+    EXPECT_LT(timer.elapsed(), 2500);
+    setMode("normal");
+    expectSuccessful(runWorkerJob(options()));
+}
+
+TEST_F(BeatThisWorkerTest, WorkerThreadCancellationInterruptsSlowStartup) {
+    setMode("startup_hang");
+    CancelledWorkerJob thread(options());
+    auto progress = thread.progressSeen();
+    thread.start();
+    const auto signalled = progress.wait_for(8s);
+    QElapsedTimer timer;
+    timer.start();
+    thread.stop();
+    const bool finished = thread.wait(6000);
+    EXPECT_EQ(std::future_status::ready, signalled);
+    ASSERT_TRUE(finished);
+    EXPECT_LT(timer.elapsed(), 2000);
+    EXPECT_FALSE(thread.outcome().finalized);
+    EXPECT_TRUE(thread.outcome().beats.isEmpty());
+    EXPECT_TRUE(lines(QStringLiteral("requests.log")).isEmpty());
     expectTemporaryAudioRemoved();
 }
 

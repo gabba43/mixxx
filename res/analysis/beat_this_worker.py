@@ -227,15 +227,27 @@ def serve(args, input_stream=None, output_stream=None, runtime_factory=None):
     factory = (
         runtime_factory if runtime_factory is not None else BeatThisRuntime
     )
-    runtime = factory(
-        args.checkpoint, args.sha256, progress=lambda _value: None
-    )
 
     def emit(kind, **fields):
         json_line(
             output_stream,
             {"protocol": PROTOCOL_VERSION, "type": kind, **fields},
         )
+
+    last_startup_progress = 0.0
+
+    def startup_progress(value):
+        nonlocal last_startup_progress
+        if (
+            type(value) not in (int, float)
+            or not last_startup_progress <= value <= 0.1
+            or not math.isfinite(value)
+        ):
+            raise ValueError("Invalid startup progress")
+        last_startup_progress = value
+        emit("startup_progress", progress=value)
+
+    runtime = factory(args.checkpoint, args.sha256, progress=startup_progress)
 
     emit(
         "ready",

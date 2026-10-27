@@ -118,6 +118,7 @@ class BeatThisSession {
                                                     options.sha256.toLower()})
                                       .toJson(QJsonDocument::Compact);
         const bool reused = process.state() == QProcess::Running && key == identity;
+        double lastProgress = 0;
         if (!reused) {
             stop();
             errors.clear();
@@ -129,15 +130,36 @@ class BeatThisSession {
                     "--sha256",
                     options.sha256});
             process.start();
-            QJsonObject ready;
-            if (!process.waitForStarted(std::min(10000, options.startupTimeoutMs)) ||
-                    !readMessage(&ready, &total, options.startupTimeoutMs) ||
-                    ready.value("type").toString() != "ready" ||
-                    ready.value("model_sha256").toString() != options.sha256.toLower()) {
-                return fail("startup or protocol handshake");
+            if (!process.waitForStarted(std::min(10000, options.startupTimeoutMs))) {
+                return fail("worker startup");
             }
-            key = identity;
-            workerTimings(ready.value("timings").toObject(), timings);
+            for (;;) {
+                QJsonObject ready;
+                if (!readMessage(&ready, &total, options.startupTimeoutMs)) {
+                    return fail("startup or protocol handshake");
+                }
+                if (ready.value("type").toString() == "startup_progress") {
+                    const auto entry = ready.value("progress");
+                    const double value = entry.toDouble(-1);
+                    if (!entry.isDouble() || !std::isfinite(value) ||
+                            value < lastProgress || value > 0.1 || value < 0 ||
+                            ready.contains("id")) {
+                        return fail("invalid startup progress");
+                    }
+                    lastProgress = value;
+                    if (progress)
+                        progress(value);
+                    continue;
+                }
+                if (ready.value("type").toString() != "ready" ||
+                        ready.value("model_sha256").toString() != options.sha256.toLower()) {
+                    return fail("startup or protocol handshake");
+                }
+                key = identity;
+                workerTimings(ready.value("timings").toObject(), timings);
+                qDebug() << "Beat This! worker ready" << process.processId();
+                break;
+            }
         } else {
             timings->insert("startup", 0.0);
         }
@@ -158,7 +180,7 @@ class BeatThisSession {
         requestTimer.start();
         if (stopping() || process.write(request) != request.size())
             return fail("request write");
-        double lastProgress = 0;
+        qDebug() << "Beat This! worker job queued" << id << "frames" << frames;
         for (;;) {
             QJsonObject message;
             if (!readMessage(&message, &requestTimer, options.requestTimeoutMs) ||
@@ -174,6 +196,7 @@ class BeatThisSession {
                     return fail("invalid progress");
                 }
                 lastProgress = value;
+                qDebug() << "Beat This! worker job progress" << id << value;
                 if (progress)
                     progress(value);
             } else if (type == "error") {

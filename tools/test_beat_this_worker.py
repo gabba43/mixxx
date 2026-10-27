@@ -384,6 +384,84 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual(["ready"], [x["type"] for x in messages])
 
+    def test_startup_progress_is_flushed_before_model_loading_finishes(self):
+        class RecordingOutput(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flushed = []
+
+            def flush(self):
+                self.flushed.append(self.getvalue())
+
+        output = RecordingOutput()
+        testcase = self
+
+        class LoadingRuntime(FakeRuntime):
+            def __init__(self, checkpoint, sha256, progress):
+                for value in [0.01, 0.05, 0.1]:
+                    progress(value)
+                    messages = [
+                        json.loads(line)
+                        for line in output.getvalue().splitlines()
+                    ]
+                    testcase.assertTrue(messages)
+                    testcase.assertEqual(value, messages[-1]["progress"])
+                    testcase.assertEqual(
+                        "startup_progress", messages[-1]["type"]
+                    )
+                    testcase.assertEqual(output.getvalue(), output.flushed[-1])
+                    testcase.assertTrue(
+                        all(message["protocol"] == 2 for message in messages)
+                    )
+                    testcase.assertTrue(
+                        all("id" not in message for message in messages)
+                    )
+                super().__init__(checkpoint, sha256, progress)
+
+        code = worker.serve(
+            SimpleNamespace(checkpoint=self.checkpoint, sha256=self.digest),
+            input_stream=io.StringIO(),
+            output_stream=output,
+            runtime_factory=LoadingRuntime,
+        )
+        self.assertEqual(0, code)
+        self.assertEqual(4, len(output.flushed))
+        messages = [
+            json.loads(line) for line in output.getvalue().splitlines()
+        ]
+        self.assertEqual("ready", messages[-1]["type"])
+        self.assertEqual(self.digest, messages[-1]["model_sha256"])
+
+    def test_invalid_startup_progress_is_rejected_before_ready(self):
+        for values in [
+            [True],
+            ["0.1"],
+            [float("nan")],
+            [float("inf")],
+            [-0.01],
+            [0.11],
+            [0.05, 0.01],
+        ]:
+            with self.subTest(values=values):
+
+                class InvalidProgressRuntime(FakeRuntime):
+                    def __init__(self, checkpoint, sha256, progress):
+                        for value in values:
+                            progress(value)
+                        super().__init__(checkpoint, sha256, progress)
+
+                output = io.StringIO()
+                with self.assertRaisesRegex(ValueError, "startup progress"):
+                    worker.serve(
+                        SimpleNamespace(
+                            checkpoint=self.checkpoint, sha256=self.digest
+                        ),
+                        input_stream=io.StringIO(),
+                        output_stream=output,
+                        runtime_factory=InvalidProgressRuntime,
+                    )
+                self.assertNotIn('"type":"ready"', output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

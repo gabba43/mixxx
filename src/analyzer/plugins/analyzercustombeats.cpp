@@ -2,6 +2,7 @@
 #include "analyzer/plugins/analyzercustombeats.h"
 
 #include <QElapsedTimer>
+#include <QtDebug>
 #include <algorithm>
 
 #include "analyzer/plugins/beatgridevidence.h"
@@ -55,10 +56,15 @@ bool AnalyzerCustomBeats::finalizeWithProgress(
             progress(value * 0.5);
         }
     };
+    qInfo() << "Custom beat analysis: finalizing variable model" << m_variable->id();
     if (!m_variable->finalizeWithProgress(
                 m_constant ? firstProgress : progress)) {
         return false;
     }
+    if (m_constant) {
+        firstProgress(1.0);
+    }
+    qInfo() << "Custom beat analysis: variable model finished";
     m_selected = m_variable.get();
     if (m_mode == BeatGridMode::Auto && m_constant) {
         QElapsedTimer selection;
@@ -73,10 +79,12 @@ bool AnalyzerCustomBeats::finalizeWithProgress(
                     progress(0.5 + value * 0.5);
                 }
             };
+            qInfo() << "Custom beat analysis: finalizing constant model" << m_constant->id();
             if (!m_constant->finalizeWithProgress(secondProgress)) {
                 m_selected = nullptr;
                 return false;
             }
+            qInfo() << "Custom beat analysis: constant model finished";
             m_selected = m_constant.get();
             if (compareAudio) {
                 selection.restart();
