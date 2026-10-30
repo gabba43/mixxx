@@ -4,6 +4,7 @@
 
 #include "audio/frame.h"
 #include "audio/types.h"
+#include "track/beatgridmode.h"
 #include "track/beats.h"
 #include "track/bpm.h"
 
@@ -20,5 +21,11 @@ class BeatFactory {
             const QVector<mixxx::audio::FramePos>& beats,
             const QHash<QString, QString>& extraVersionInfo,
             bool fixedTempo,
+            mixxx::audio::SampleRate sampleRate);
+
+    static mixxx::BeatsPointer makePreferredBeats(
+            const QVector<mixxx::audio::FramePos>& beats,
+            const QHash<QString, QString>& extraVersionInfo,
+            mixxx::BeatGridMode mode,
             mixxx::audio::SampleRate sampleRate);
 };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "preferences/usersettings.h"
+#include "track/beatgridmode.h"
 
 #define VAMP_CONFIG_KEY "[Vamp]"
 
@@ -34,8 +35,47 @@ class BeatDetectionSettings {
     DEFINE_PREFERENCE_HELPERS(BpmDetectionEnabled, bool,
                               BPM_CONFIG_KEY, BPM_DETECTION_ENABLED, true);
 
-    DEFINE_PREFERENCE_HELPERS(FixedTempoAssumption, bool,
-                              BPM_CONFIG_KEY, BPM_FIXED_TEMPO_ASSUMPTION, true);
+    using TempoMode = mixxx::BeatGridMode;
+
+    bool getFixedTempoAssumptionDefault() const {
+        return true;
+    }
+    bool getFixedTempoAssumption() const {
+        return m_pConfig->getValue<bool>(
+                ConfigKey(BPM_CONFIG_KEY, BPM_FIXED_TEMPO_ASSUMPTION), true);
+    }
+    void setFixedTempoAssumption(bool enabled) {
+        m_pConfig->remove(ConfigKey(BPM_CONFIG_KEY, "tempo_mode"));
+        m_pConfig->setValue(
+                ConfigKey(BPM_CONFIG_KEY, BPM_FIXED_TEMPO_ASSUMPTION), enabled);
+    }
+    void setFixedTempoAssumptionToDefault() {
+        setFixedTempoAssumption(getFixedTempoAssumptionDefault());
+    }
+    TempoMode getTempoModeDefault() const {
+        return TempoMode::Auto;
+    }
+    TempoMode getTempoMode() const {
+        const int mode = m_pConfig->getValue<int>(
+                ConfigKey(BPM_CONFIG_KEY, "tempo_mode"), -1);
+        if (mode >= static_cast<int>(TempoMode::Auto) &&
+                mode <= static_cast<int>(TempoMode::Variable)) {
+            return static_cast<TempoMode>(mode);
+        }
+        if (m_pConfig->exists(
+                    ConfigKey(BPM_CONFIG_KEY, BPM_FIXED_TEMPO_ASSUMPTION))) {
+            return getFixedTempoAssumption() ? TempoMode::Constant
+                                             : TempoMode::Variable;
+        }
+        return getTempoModeDefault();
+    }
+    void setTempoMode(TempoMode mode) {
+        m_pConfig->setValue(ConfigKey(BPM_CONFIG_KEY, "tempo_mode"),
+                static_cast<int>(mode));
+        m_pConfig->setValue(
+                ConfigKey(BPM_CONFIG_KEY, BPM_FIXED_TEMPO_ASSUMPTION),
+                mode == TempoMode::Constant);
+    }
 
     DEFINE_PREFERENCE_HELPERS(ReanalyzeWhenSettingsChange, bool,
                               BPM_CONFIG_KEY, BPM_REANALYZE_WHEN_SETTINGS_CHANGE, false);

@@ -161,6 +161,7 @@ class WTrackMenu : public QMenu {
     void slotAnalyze();
     void slotReanalyze();
     void slotReanalyzeWithFixedTempo();
+    void slotReanalyzeWithAutomaticTempo();
     void slotReanalyzeWithVariableTempo();
 
     // BPM
@@ -360,6 +361,7 @@ class WTrackMenu : public QMenu {
     parented_ptr<QAction> m_pAnalyzeAction;
     parented_ptr<QAction> m_pReanalyzeAction;
     parented_ptr<QAction> m_pReanalyzeConstBpmAction;
+    parented_ptr<QAction> m_pReanalyzeAutoBpmAction;
     parented_ptr<QAction> m_pReanalyzeVarBpmAction;
 
     // Clear track metadata actions

@@ -1212,6 +1212,8 @@ add_library(
   src/analyzer/plugins/analyzerqueenmarybeats.cpp
   src/analyzer/plugins/analyzerqueenmarykey.cpp
   src/analyzer/plugins/analyzersoundtouchbeats.cpp
+  src/analyzer/plugins/beattrackingrefiner.cpp
+  src/analyzer/plugins/beatgridevidence.cpp
   src/analyzer/plugins/buffering_utils.cpp
   src/analyzer/trackanalysisscheduler.cpp
   src/audio/frame.cpp
@@ -2925,6 +2927,12 @@ if(BUILD_TESTING)
   set(
     src-mixxx-test
     src/test/analyserwaveformtest.cpp
+    src/test/beat_analysis_comparison_test.cpp
+    src/test/analyzerbeats_test.cpp
+    src/test/beatgridevidence_test.cpp
+    src/test/beatphasealignment_test.cpp
+    src/test/beatgridmode_test.cpp
+    src/test/beatdetectionsettings_test.cpp
     src/test/analyzersilence_test.cpp
     src/test/audiotaperpot_test.cpp
     src/test/autodjprocessor_test.cpp
@@ -3106,6 +3114,11 @@ if(BUILD_TESTING)
   endif()
 
   set_target_properties(mixxx-test PROPERTIES AUTOMOC ON)
+  target_include_directories(
+    mixxx-test
+    PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/mixxx-lib_autogen/include$<$<BOOL:${CMAKE_CONFIGURATION_TYPES}>:_$<CONFIG>>"
+  )
   target_link_libraries(
     mixxx-test
     PRIVATE mixxx-lib mixxx-gitinfostore mixxx-xwax GTest::gtest GTest::gmock

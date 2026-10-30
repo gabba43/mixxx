@@ -61,11 +61,11 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
         return false;
     }
 
-    m_bPreferencesFixedTempo = track.getOptions().useFixedTempo.value_or(
-            m_bpmSettings.getFixedTempoAssumption());
+    m_tempoMode = track.getOptions().tempoMode.value_or(m_bpmSettings.getTempoMode());
+    m_bPreferencesFixedTempo = m_tempoMode == mixxx::BeatGridMode::Constant;
     m_bPreferencesReanalyzeOldBpm = m_bpmSettings.getReanalyzeWhenSettingsChange();
     m_bPreferencesReanalyzeImported = m_bpmSettings.getReanalyzeImported();
-    m_bPreferencesFastAnalysis = m_bpmSettings.getFastAnalysis();
+    m_bPreferencesFastAnalysis = m_bpmSettings.getFastAnalysis() && m_bPreferencesFixedTempo;
 
     const auto plugins = availablePlugins();
     if (!plugins.isEmpty()) {
@@ -88,6 +88,7 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
 
     m_sampleRate = sampleRate;
     m_channelCount = channelCount;
+    m_audioEvidence.initialize(sampleRate);
     // In fast analysis mode, skip processing after
     // kFastAnalysisSecondsToAnalyze seconds are analyzed.
     if (m_bPreferencesFastAnalysis) {
@@ -104,7 +105,7 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
     DEBUG_ASSERT(!m_pPlugin);
     if (bShouldAnalyze) {
         if (m_pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
-            m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>();
+            m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>(m_tempoMode);
         } else if (m_pluginId == mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
             m_pPlugin = std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
         } else {
@@ -133,11 +134,6 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
     if (bpmLock) {
         qDebug() << "Track is BpmLocked: Beat calculation will not start";
         return false;
-    }
-
-    QString pluginID = m_bpmSettings.getBeatPluginId();
-    if (pluginID.isEmpty()) {
-        pluginID = defaultPlugin().id();
     }
 
     // If the track already has a Beats object then we need to decide whether to
@@ -173,10 +169,13 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
 
     QString version = pBeats->getVersion();
     QHash<QString, QString> extraVersionInfo = getExtraVersionInfo(
-            pluginID,
+            m_pluginId,
             m_bPreferencesFastAnalysis);
     QString newVersion = BeatFactory::getPreferredVersion(
             m_bPreferencesFixedTempo);
+    if (m_tempoMode == mixxx::BeatGridMode::Auto) {
+        newVersion = version;
+    }
     QString newSubVersion = BeatFactory::getPreferredSubVersion(
             extraVersionInfo);
 
@@ -201,7 +200,13 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
         return false;
     }
 
-    SINT numFrames = count / m_channelCount;
+    if (m_currentFrame >= m_maxFramesToProcess) {
+        return true;
+    }
+    const SINT numFrames = std::min(
+            count / m_channelCount, m_maxFramesToProcess - m_currentFrame);
+    count = numFrames * m_channelCount;
+    m_currentFrame += numFrames;
     const CSAMPLE* pBeatInput = pIn;
     CSAMPLE* pDrumChannel = nullptr;
 
@@ -231,12 +236,12 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
         return false;
     }
 
-    m_currentFrame += numFrames;
-    if (m_currentFrame > m_maxFramesToProcess) {
-        return true; // silently ignore all remaining samples
-    }
-
     bool ret = m_pPlugin->processSamples(pBeatInput, count);
+    if (ret && m_tempoMode != mixxx::BeatGridMode::Variable &&
+            m_pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id() &&
+            m_channelCount != mixxx::audio::ChannelCount::mono()) {
+        ret = m_audioEvidence.processSamples(pBeatInput, count);
+    }
     if (pDrumChannel) {
         SampleUtil::free(pDrumChannel);
     }
@@ -257,6 +262,7 @@ void AnalyzerBeats::storeResults(TrackPointer pTrack) {
         return;
     }
 
+    m_audioEvidence.prepare();
     mixxx::BeatsPointer pBeats;
     if (m_pPlugin->supportsBeatTracking()) {
         QVector<mixxx::audio::FramePos> beats = m_pPlugin->getBeats();
@@ -265,8 +271,26 @@ void AnalyzerBeats::storeResults(TrackPointer pTrack) {
         pBeats = BeatFactory::makePreferredBeats(
                 beats,
                 extraVersionInfo,
-                m_bPreferencesFixedTempo,
+                m_tempoMode,
                 m_sampleRate);
+        if (pBeats && m_tempoMode == mixxx::BeatGridMode::Auto && m_audioEvidence.hasEvidence()) {
+            const auto candidate = [&](bool constant) {
+                return pBeats->hasConstantTempo() == constant
+                        ? pBeats
+                        : BeatFactory::makePreferredBeats(beats,
+                                  extraVersionInfo,
+                                  constant,
+                                  m_sampleRate);
+            };
+            const auto constant = m_audioEvidence.evaluate(candidate(true), true);
+            const auto variable = m_audioEvidence.evaluate(candidate(false), true);
+            pBeats = mixxx::BeatGridEvidence::preferConstant(
+                             constant, variable, pBeats->hasConstantTempo())
+                    ? constant.grid
+                    : variable.grid;
+        } else if (pBeats && m_tempoMode == mixxx::BeatGridMode::Constant) {
+            pBeats = m_audioEvidence.evaluate(pBeats, false).grid;
+        }
         qDebug() << "AnalyzerBeats plugin detected" << beats.size()
                  << "beats. Predominant BPM:"
                  << (pBeats ? pBeats->getBpmInRange(
@@ -281,14 +305,25 @@ void AnalyzerBeats::storeResults(TrackPointer pTrack) {
         pBeats = mixxx::Beats::fromConstTempo(m_sampleRate, mixxx::audio::kStartFramePos, bpm);
     }
 
-    pTrack->trySetBeats(pBeats);
+    if (pBeats) {
+        pTrack->trySetBeats(pBeats);
+    }
 }
 
-// static
 QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
-        const QString& pluginId, bool bPreferencesFastAnalysis) {
+        const QString& pluginId, bool bPreferencesFastAnalysis) const {
     QHash<QString, QString> extraVersionInfo;
     extraVersionInfo["vamp_plugin_id"] = pluginId;
+    if (m_tempoMode == mixxx::BeatGridMode::Auto) {
+        extraVersionInfo["tempo_mode"] = "auto:3";
+    }
+    if (m_tempoMode != mixxx::BeatGridMode::Variable &&
+            pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
+        extraVersionInfo["audio_grid_evidence"] = "3";
+    }
+    if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
+        extraVersionInfo["beat_tracker_version"] = "3";
+    }
     if (bPreferencesFastAnalysis) {
         extraVersionInfo["fast_analysis"] = "1";
     }

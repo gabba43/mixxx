@@ -45,16 +45,25 @@ automatically shows a beat-grid for them, and allows you to synchronize tracks u
      </property>
      <layout class="QVBoxLayout" name="verticalLayout">
       <item>
-       <widget class="QCheckBox" name="checkBoxFixedTempo">
+       <layout class="QHBoxLayout" name="tempoModeLayout">
+        <item>
+         <widget class="QLabel" name="labelTempoMode">
+          <property name="text"><string>Tempo:</string></property>
+          <property name="buddy"><cstring>comboBoxTempoMode</cstring></property>
+         </widget>
+        </item>
+        <item>
+       <widget class="QComboBox" name="comboBoxTempoMode">
         <property name="toolTip">
-         <string>Converts beats detected by the analyzer into a fixed-tempo beatgrid.
-Use this setting if your tracks have a constant tempo (e.g. most electronic music).
-Often results in higher quality beatgrids, but will not do well on tracks that have tempo shifts.</string>
+         <string>Auto chooses a constant or variable beatgrid from the detected beats and audio evidence.
+Constant assumes a steady tempo. Variable retains tempo changes.</string>
         </property>
-        <property name="text">
-         <string>Assume constant tempo (Recommended)</string>
+        <property name="accessibleName">
+         <string>Beatgrid tempo mode</string>
         </property>
        </widget>
+        </item>
+       </layout>
       </item>
       <item>
        <widget class="QCheckBox" name="checkBoxFastAnalysis">
@@ -160,7 +169,7 @@ This can speed up beat detection on slower computers but may result in lower qua
  <tabstops>
   <tabstop>checkBoxAnalyzerEnabled</tabstop>
   <tabstop>comboBoxBeatPlugin</tabstop>
-  <tabstop>checkBoxFixedTempo</tabstop>
+  <tabstop>comboBoxTempoMode</tabstop>
   <tabstop>checkBoxReanalyze</tabstop>
   <tabstop>checkBoxReanalyzeImported</tabstop>
  </tabstops>

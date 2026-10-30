@@ -29,17 +29,16 @@ class DlgPrefBeats : public DlgPreferencePage, public Ui::DlgBeatsDlg {
     void pluginSelected(int i);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
     void analyzerEnabled(Qt::CheckState state);
-    void fixedtempoEnabled(Qt::CheckState state);
     void fastAnalysisEnabled(Qt::CheckState state);
     void slotReanalyzeChanged(Qt::CheckState state);
     void slotReanalyzeImportedChanged(Qt::CheckState state);
 #else
     void analyzerEnabled(int i);
-    void fixedtempoEnabled(int i);
     void fastAnalysisEnabled(int i);
     void slotReanalyzeChanged(int value);
     void slotReanalyzeImportedChanged(int value);
 #endif
+    void tempoModeSelected(int index);
     void slotStemStrategyChanged(int index);
 
   private:
@@ -49,7 +48,7 @@ class DlgPrefBeats : public DlgPreferencePage, public Ui::DlgBeatsDlg {
     QList<mixxx::AnalyzerPluginInfo> m_availablePlugins;
     QString m_selectedAnalyzerId;
     bool m_bAnalyzerEnabled;
-    bool m_bFixedTempoEnabled;
+    mixxx::BeatGridMode m_tempoMode;
     bool m_bFastAnalysisEnabled;
     bool m_bReanalyze;
     bool m_bReanalyzeImported;

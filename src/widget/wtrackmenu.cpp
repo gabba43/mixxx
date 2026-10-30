@@ -31,6 +31,7 @@
 #include "mixer/playerinfo.h"
 #include "mixer/playermanager.h"
 #include "moc_wtrackmenu.cpp"
+#include "preferences/beatdetectionsettings.h"
 #include "preferences/colorpalettesettings.h"
 #include "preferences/configobject.h"
 #include "preferences/dialog/dlgprefdeck.h"
@@ -581,6 +582,12 @@ void WTrackMenu::createActions() {
         m_pReanalyzeAction = make_parented<QAction>(tr("Reanalyze"), this);
         connect(m_pReanalyzeAction, &QAction::triggered, this, &WTrackMenu::slotReanalyze);
 
+        m_pReanalyzeAutoBpmAction =
+                make_parented<QAction>(tr("Reanalyze (Auto)"), this);
+        connect(m_pReanalyzeAutoBpmAction,
+                &QAction::triggered,
+                this,
+                &WTrackMenu::slotReanalyzeWithAutomaticTempo);
         m_pReanalyzeConstBpmAction = make_parented<QAction>(tr("Reanalyze (constant BPM)"), this);
         connect(m_pReanalyzeConstBpmAction,
                 &QAction::triggered,
@@ -766,6 +773,7 @@ void WTrackMenu::setupActions() {
         m_pAnalyzeMenu->addAction(m_pAnalyzeAction);
         m_pAnalyzeMenu->addAction(m_pReanalyzeAction);
         m_pAnalyzeMenu->addAction(m_pReanalyzeConstBpmAction);
+        m_pAnalyzeMenu->addAction(m_pReanalyzeAutoBpmAction);
         m_pAnalyzeMenu->addAction(m_pReanalyzeVarBpmAction);
         addMenu(m_pAnalyzeMenu);
     }
@@ -1139,13 +1147,16 @@ void WTrackMenu::updateMenus() {
     }
 
     if (featureIsEnabled(Feature::Analyze)) {
-        bool useFixedTempo = m_pConfig->getValue<bool>(
-                ConfigKey("[BPM]", "BeatDetectionFixedTempoAssumption"));
+        const auto mode = BeatDetectionSettings(m_pConfig).getTempoMode();
         // Since we already have a 'Reanalyze' action that uses the configured
         // default, we hide the redundant menu as per suggestion:
         // https://github.com/mixxxdj/mixxx/pull/10931#issuecomment-1262559750
-        m_pReanalyzeConstBpmAction->setVisible(!useFixedTempo);
-        m_pReanalyzeVarBpmAction->setVisible(useFixedTempo);
+        m_pReanalyzeAutoBpmAction->setVisible(
+                mode != mixxx::BeatGridMode::Auto);
+        m_pReanalyzeConstBpmAction->setVisible(
+                mode != mixxx::BeatGridMode::Constant);
+        m_pReanalyzeVarBpmAction->setVisible(
+                mode != mixxx::BeatGridMode::Variable);
     }
 
     if (featureIsEnabled(Feature::Reset) ||
@@ -1813,14 +1824,21 @@ void WTrackMenu::slotReanalyze() {
 void WTrackMenu::slotReanalyzeWithFixedTempo() {
     clearBeats();
     AnalyzerTrack::Options options;
-    options.useFixedTempo = true;
+    options.tempoMode = mixxx::BeatGridMode::Constant;
     addToAnalysis(options);
 }
 
 void WTrackMenu::slotReanalyzeWithVariableTempo() {
     clearBeats();
     AnalyzerTrack::Options options;
-    options.useFixedTempo = false;
+    options.tempoMode = mixxx::BeatGridMode::Variable;
+    addToAnalysis(options);
+}
+
+void WTrackMenu::slotReanalyzeWithAutomaticTempo() {
+    clearBeats();
+    AnalyzerTrack::Options options;
+    options.tempoMode = mixxx::BeatGridMode::Auto;
     addToAnalysis(options);
 }
 

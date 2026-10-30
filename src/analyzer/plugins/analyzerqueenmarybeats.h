@@ -6,6 +6,7 @@
 
 #include "analyzer/plugins/analyzerplugin.h"
 #include "analyzer/plugins/buffering_utils.h"
+#include "track/beatgridmode.h"
 
 class DetectionFunction;
 
@@ -23,7 +24,7 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
                 true);
     }
 
-    AnalyzerQueenMaryBeats();
+    explicit AnalyzerQueenMaryBeats(BeatGridMode mode = BeatGridMode::Constant);
     ~AnalyzerQueenMaryBeats() override;
 
     AnalyzerPluginInfo info() const override {
@@ -43,12 +44,16 @@ class AnalyzerQueenMaryBeats : public AnalyzerBeatsPlugin {
     }
 
   private:
+    const BeatGridMode m_tempoMode;
     std::unique_ptr<DetectionFunction> m_pDetectionFunction;
+    std::unique_ptr<DetectionFunction> m_pPulseDetectionFunction;
     DownmixAndOverlapHelper m_helper;
     mixxx::audio::SampleRate m_sampleRate;
     int m_windowSize;
     int m_stepSizeFrames;
     std::vector<double> m_detectionResults;
+    std::vector<double> m_pulseDetectionResults;
+    std::vector<double> m_lowBandWindow;
     QVector<mixxx::audio::FramePos> m_resultBeats;
 };
 
