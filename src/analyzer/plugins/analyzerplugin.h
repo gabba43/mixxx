@@ -76,6 +76,12 @@ class AnalyzerBeatsPlugin : public AnalyzerPlugin {
     virtual QVector<mixxx::audio::FramePos> getBeats() const {
         return {};
     }
+    virtual bool providesResolvedBeatGrid() const {
+        return false;
+    }
+    virtual mixxx::BeatsPointer resolvedBeatGrid(const QString&) const {
+        return {};
+    }
 };
 
 class AnalyzerKeyPlugin : public AnalyzerPlugin {

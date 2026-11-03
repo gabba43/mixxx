@@ -4,14 +4,19 @@
 #include <QString>
 #include <QVector>
 #include <QtDebug>
+#include <algorithm>
+#include <exception>
+#include <limits>
 
 #include "analyzer/analyzertrack.h"
 #include "analyzer/constants.h"
+#include "analyzer/plugins/analyzerphasegrid.h"
 #include "analyzer/plugins/analyzerqueenmarybeats.h"
 #include "analyzer/plugins/analyzersoundtouchbeats.h"
 #include "library/rekordbox/rekordboxconstants.h"
 #include "track/beatfactory.h"
 #include "track/track.h"
+#include "util/fpclassify.h"
 
 // static
 QList<mixxx::AnalyzerPluginInfo> AnalyzerBeats::availablePlugins() {
@@ -19,6 +24,7 @@ QList<mixxx::AnalyzerPluginInfo> AnalyzerBeats::availablePlugins() {
     // First one below is the default
     plugins.append(mixxx::AnalyzerQueenMaryBeats::pluginInfo());
     plugins.append(mixxx::AnalyzerSoundTouchBeats::pluginInfo());
+    plugins.append(mixxx::AnalyzerPhaseGrid::pluginInfo());
     return plugins;
 }
 
@@ -79,6 +85,20 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
         }
     }
 
+    if (m_pluginId == mixxx::AnalyzerPhaseGrid::pluginInfo().id()) {
+        m_phaseGridInputFailed = false;
+        m_phaseGridStereoBuffer.clear();
+        if (!sampleRate.isValid() || sampleRate.value() < 1000 || sampleRate.value() > 384000 ||
+                (channelCount != mixxx::audio::ChannelCount::mono() &&
+                        channelCount != mixxx::audio::ChannelCount::stereo() &&
+                        channelCount != mixxx::audio::ChannelCount::stem())) {
+            return false;
+        }
+        m_tempoMode = mixxx::BeatGridMode::Constant;
+        m_bPreferencesFixedTempo = true;
+        m_bPreferencesFastAnalysis = false;
+    }
+
     qDebug() << "AnalyzerBeats preference settings:"
              << "\nPlugin:" << m_pluginId
              << "\nFixed tempo assumption:" << m_bPreferencesFixedTempo
@@ -108,6 +128,8 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
             m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>(m_tempoMode);
         } else if (m_pluginId == mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
             m_pPlugin = std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
+        } else if (m_pluginId == mixxx::AnalyzerPhaseGrid::pluginInfo().id()) {
+            m_pPlugin = std::make_unique<mixxx::AnalyzerPhaseGrid>();
         } else {
             // This must not happen, because we have already verified above
             // that the PlugInId is valid
@@ -159,6 +181,10 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
     if (subVersion == mixxx::rekordboxconstants::beatsSubversion) {
         return m_bPreferencesReanalyzeImported;
     }
+    if (m_pluginId == mixxx::AnalyzerPhaseGrid::pluginInfo().id() && subVersion.isEmpty() &&
+            !m_bPreferencesReanalyzeOldBpm) {
+        return false;
+    }
 
     if (subVersion.isEmpty() && pBeats->firstBeat() <= mixxx::audio::kStartFramePos &&
             m_pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
@@ -200,6 +226,23 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
         return false;
     }
 
+    const bool phaseGrid = m_pluginId == mixxx::AnalyzerPhaseGrid::pluginInfo().id();
+    if (phaseGrid) {
+        if (m_phaseGridInputFailed || count < 0 || count % m_channelCount.value() != 0 ||
+                (count && !pIn)) {
+            m_phaseGridInputFailed = true;
+            return false;
+        }
+        if (count == 0) {
+            return true;
+        }
+        if (!std::all_of(pIn, pIn + count,
+                    [](CSAMPLE value) { return util_isfinite(static_cast<double>(value)); })) {
+            m_phaseGridInputFailed = true;
+            return false;
+        }
+    }
+
     if (m_currentFrame >= m_maxFramesToProcess) {
         return true;
     }
@@ -210,7 +253,24 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
     const CSAMPLE* pBeatInput = pIn;
     CSAMPLE* pDrumChannel = nullptr;
 
-    if (m_channelCount == mixxx::audio::ChannelCount::stem()) {
+    if (phaseGrid && m_channelCount == mixxx::audio::ChannelCount::mono()) {
+        if (numFrames > std::numeric_limits<SINT>::max() / 2) {
+            m_phaseGridInputFailed = true;
+            return false;
+        }
+        try {
+            m_phaseGridStereoBuffer.resize(static_cast<std::size_t>(numFrames) * 2);
+        } catch (const std::exception&) {
+            m_phaseGridInputFailed = true;
+            return false;
+        }
+        for (SINT frame = 0; frame < numFrames; ++frame) {
+            m_phaseGridStereoBuffer[frame * 2] = pIn[frame];
+            m_phaseGridStereoBuffer[frame * 2 + 1] = pIn[frame];
+        }
+        count = numFrames * 2;
+        pBeatInput = m_phaseGridStereoBuffer.data();
+    } else if (m_channelCount == mixxx::audio::ChannelCount::stem()) {
         // We have an 8 channel soundsource. The only implemented soundsource with
         // 8ch is the NI STEM file format.
         // TODO: If we add other soundsources with 8ch, we need to rework this condition.
@@ -221,6 +281,9 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
         pDrumChannel = SampleUtil::alloc(count);
 
         VERIFY_OR_DEBUG_ASSERT(pDrumChannel) {
+            if (phaseGrid) {
+                m_phaseGridInputFailed = true;
+            }
             return false;
         }
 
@@ -237,7 +300,7 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
     }
 
     bool ret = m_pPlugin->processSamples(pBeatInput, count);
-    if (ret && m_tempoMode != mixxx::BeatGridMode::Variable &&
+    if (ret && !phaseGrid && m_tempoMode != mixxx::BeatGridMode::Variable &&
             m_pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id() &&
             m_channelCount != mixxx::audio::ChannelCount::mono()) {
         ret = m_audioEvidence.processSamples(pBeatInput, count);
@@ -245,15 +308,32 @@ bool AnalyzerBeats::processSamples(const CSAMPLE* pIn, SINT count) {
     if (pDrumChannel) {
         SampleUtil::free(pDrumChannel);
     }
+    if (phaseGrid && !ret) {
+        m_phaseGridInputFailed = true;
+    }
     return ret;
 }
 
 void AnalyzerBeats::cleanup() {
     m_pPlugin.reset();
+    std::vector<CSAMPLE>().swap(m_phaseGridStereoBuffer);
+    m_phaseGridInputFailed = false;
 }
 
 void AnalyzerBeats::storeResults(TrackPointer pTrack) {
     VERIFY_OR_DEBUG_ASSERT(m_pPlugin) {
+        return;
+    }
+
+    if (m_pPlugin->providesResolvedBeatGrid()) {
+        if (!m_phaseGridInputFailed && m_currentFrame == m_maxFramesToProcess &&
+                m_pPlugin->finalize()) {
+            const auto pBeats = m_pPlugin->resolvedBeatGrid(BeatFactory::getPreferredSubVersion(
+                    getExtraVersionInfo(m_pluginId, false)));
+            if (pBeats) {
+                pTrack->trySetBeats(pBeats);
+            }
+        }
         return;
     }
 
@@ -314,6 +394,18 @@ QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
         const QString& pluginId, bool bPreferencesFastAnalysis) const {
     QHash<QString, QString> extraVersionInfo;
     extraVersionInfo["vamp_plugin_id"] = pluginId;
+    if (pluginId == mixxx::AnalyzerPhaseGrid::pluginInfo().id()) {
+        const auto version = mixxx::AnalyzerPhaseGrid::extraVersionInfo(
+                m_sampleRate, m_channelCount);
+        for (auto it = version.cbegin(); it != version.cend(); ++it) {
+            extraVersionInfo.insert(it.key(), it.value());
+        }
+        if (m_channelCount == mixxx::audio::ChannelCount::stem()) {
+            extraVersionInfo.insert(QStringLiteral("phase_grid_stem_strategy"),
+                    QString::number(static_cast<int>(m_bpmSettings.getStemStrategy())));
+        }
+        return extraVersionInfo;
+    }
     if (m_tempoMode == mixxx::BeatGridMode::Auto) {
         extraVersionInfo["tempo_mode"] = "auto:3";
     }

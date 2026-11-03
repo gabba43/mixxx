@@ -2,6 +2,11 @@
 
 # Model-independent beat analysis port
 
+This report records the initial port at `c85a8ae16b`. The later, separately
+selectable Phase Histogram integration is documented in
+[PHASEGRID_INTEGRATION.md](PHASEGRID_INTEGRATION.md); analyzer counts and test
+totals below describe the initial port.
+
 The working branch is `feat/model-independent-beat-analysis`. Its unchanged
 production baseline is Mixxx **2.7.0-alpha**, commit
 `0fffd3d0d07b755c34c1730f7b87afadd8f2be19`.

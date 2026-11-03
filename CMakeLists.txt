@@ -1195,6 +1195,78 @@ set(
   "CMAKE_CXX_CLANG_TIDY equivalent that only applies to mixxx sources, not bundled dependencies"
 )
 
+add_library(
+  mixxx-phasegrid
+  STATIC
+  EXCLUDE_FROM_ALL
+  lib/phasegrid/transient_detector.cpp
+  lib/phasegrid/phase_grid_core.cpp
+  lib/phasegrid/analysis_pipeline.cpp
+)
+set_target_properties(
+  mixxx-phasegrid
+  PROPERTIES POSITION_INDEPENDENT_CODE ON INTERPROCEDURAL_OPTIMIZATION OFF
+)
+target_compile_features(mixxx-phasegrid PRIVATE cxx_std_17)
+target_include_directories(
+  mixxx-phasegrid
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/lib/phasegrid"
+)
+if(MSVC)
+  target_compile_options(mixxx-phasegrid PRIVATE /fp:precise)
+  set_property(
+    SOURCE src/analyzer/plugins/analyzerphasegrid.cpp
+    APPEND
+    PROPERTY COMPILE_OPTIONS /fp:precise
+  )
+else()
+  target_compile_options(
+    mixxx-phasegrid
+    PRIVATE -ffp-contract=on -fno-fast-math -fno-lto
+  )
+  set_property(
+    SOURCE src/analyzer/plugins/analyzerphasegrid.cpp
+    APPEND
+    PROPERTY COMPILE_OPTIONS -ffp-contract=on -fno-fast-math -fno-lto
+  )
+endif()
+set(phasegrid_source_hashes "")
+foreach(
+  phasegrid_source
+  core_types.h
+  transient_detector.h
+  transient_detector.cpp
+  phase_grid_core.h
+  phase_grid_core.cpp
+  analysis_pipeline.h
+  analysis_pipeline.cpp
+)
+  set(
+    phasegrid_source_path
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/phasegrid/${phasegrid_source}"
+  )
+  file(SHA256 "${phasegrid_source_path}" phasegrid_source_hash)
+  string(
+    APPEND
+    phasegrid_source_hashes
+    "${phasegrid_source}:${phasegrid_source_hash}\n"
+  )
+  set_property(
+    DIRECTORY
+    APPEND
+    PROPERTY CMAKE_CONFIGURE_DEPENDS "${phasegrid_source_path}"
+  )
+endforeach()
+string(SHA256 phasegrid_source_fingerprint "${phasegrid_source_hashes}")
+set_source_files_properties(
+  src/analyzer/plugins/analyzerphasegrid.cpp
+  PROPERTIES
+    COMPILE_DEFINITIONS
+      "MIXXX_PHASEGRID_SOURCE_FINGERPRINT=\"${phasegrid_source_fingerprint}\""
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/lib/phasegrid"
+    SKIP_PRECOMPILE_HEADERS ON
+)
+
 # Mixxx itself
 add_library(
   mixxx-lib
@@ -1212,6 +1284,7 @@ add_library(
   src/analyzer/plugins/analyzerqueenmarybeats.cpp
   src/analyzer/plugins/analyzerqueenmarykey.cpp
   src/analyzer/plugins/analyzersoundtouchbeats.cpp
+  src/analyzer/plugins/analyzerphasegrid.cpp
   src/analyzer/plugins/beattrackingrefiner.cpp
   src/analyzer/plugins/beatgridevidence.cpp
   src/analyzer/plugins/buffering_utils.cpp
@@ -2076,6 +2149,7 @@ set_target_properties(
   mixxx-lib
   PROPERTIES AUTOMOC ON AUTOUIC ON CXX_CLANG_TIDY "${CLANG_TIDY}"
 )
+target_link_libraries(mixxx-lib PRIVATE mixxx-phasegrid)
 target_include_directories(
   mixxx-lib
   PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/src"
@@ -2933,6 +3007,8 @@ if(BUILD_TESTING)
     src/test/beatphasealignment_test.cpp
     src/test/beatgridmode_test.cpp
     src/test/beatdetectionsettings_test.cpp
+    src/test/phasegrid_analyzer_test.cpp
+    src/test/phasegrid_comparison_test.cpp
     src/test/analyzersilence_test.cpp
     src/test/audiotaperpot_test.cpp
     src/test/autodjprocessor_test.cpp
@@ -3133,6 +3209,41 @@ if(BUILD_TESTING)
   include(CTest)
   include(GoogleTest)
   enable_testing()
+
+  foreach(phasegrid_suite transient_detector phase_grid_core analysis_pipeline)
+    add_executable(
+      phasegrid-${phasegrid_suite}-test
+      "lib/phasegrid/tests/${phasegrid_suite}_test.cpp"
+    )
+    target_link_libraries(
+      phasegrid-${phasegrid_suite}-test
+      PRIVATE mixxx-phasegrid
+    )
+    set_target_properties(
+      phasegrid-${phasegrid_suite}-test
+      PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF
+    )
+    target_include_directories(
+      phasegrid-${phasegrid_suite}-test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/lib/phasegrid"
+    )
+    if(MSVC)
+      target_compile_options(
+        phasegrid-${phasegrid_suite}-test
+        PRIVATE /fp:precise
+      )
+    else()
+      target_compile_options(
+        phasegrid-${phasegrid_suite}-test
+        PRIVATE -ffp-contract=on -fno-fast-math -fno-lto
+      )
+    endif()
+    add_test(
+      NAME PhaseGridPortable.${phasegrid_suite}
+      COMMAND phasegrid-${phasegrid_suite}-test
+    )
+    add_dependencies(mixxx-test phasegrid-${phasegrid_suite}-test)
+  endforeach()
 
   file(
     GLOB_RECURSE CONTROLLER_BULK_MAPPING_LIST

@@ -3,6 +3,7 @@
 #include <QSignalBlocker>
 
 #include "analyzer/analyzerbeats.h"
+#include "analyzer/plugins/analyzerphasegrid.h"
 #include "defs_urls.h"
 #include "moc_dlgprefbeats.cpp"
 
@@ -157,12 +158,14 @@ void DlgPrefBeats::updateGui() {
     const QSignalBlocker reanalyzeBlocker(checkBoxReanalyze);
     const QSignalBlocker importedBlocker(checkBoxReanalyzeImported);
     const QSignalBlocker stemBlocker(comboBoxStemStrategy);
+    const bool phaseGridSelected =
+            m_selectedAnalyzerId == mixxx::AnalyzerPhaseGrid::pluginInfo().id();
     comboBoxTempoMode->setEnabled(m_bAnalyzerEnabled);
     comboBoxBeatPlugin->setEnabled(m_bAnalyzerEnabled);
     checkBoxAnalyzerEnabled->setChecked(m_bAnalyzerEnabled);
     // Fast analysis cannot be combined with non-constant tempo beatgrids.
-    checkBoxFastAnalysis->setEnabled(
-            m_bAnalyzerEnabled && m_tempoMode == mixxx::BeatGridMode::Constant);
+    checkBoxFastAnalysis->setEnabled(m_bAnalyzerEnabled &&
+            m_tempoMode == mixxx::BeatGridMode::Constant && !phaseGridSelected);
     checkBoxReanalyze->setEnabled(m_bAnalyzerEnabled);
     checkBoxReanalyzeImported->setEnabled(m_bAnalyzerEnabled);
 
@@ -186,10 +189,12 @@ void DlgPrefBeats::updateGui() {
     }
 
     comboBoxTempoMode->setCurrentIndex(
-            comboBoxTempoMode->findData(static_cast<int>(m_tempoMode)));
+            comboBoxTempoMode->findData(static_cast<int>(phaseGridSelected
+                            ? mixxx::BeatGridMode::Constant
+                            : m_tempoMode)));
     // Fast analysis cannot be combined with non-constant tempo beatgrids.
     checkBoxFastAnalysis->setChecked(m_bFastAnalysisEnabled &&
-            m_tempoMode == mixxx::BeatGridMode::Constant);
+            m_tempoMode == mixxx::BeatGridMode::Constant && !phaseGridSelected);
 
     checkBoxReanalyze->setChecked(m_bReanalyze);
     checkBoxReanalyzeImported->setChecked(m_bReanalyzeImported);

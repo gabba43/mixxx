@@ -7,6 +7,7 @@
 #include <QSignalSpy>
 
 #include "analyzer/analyzerbeats.h"
+#include "analyzer/plugins/analyzerphasegrid.h"
 #include "preferences/dialog/dlgprefbeats.h"
 #include "test/mixxxtest.h"
 
@@ -40,7 +41,7 @@ TEST_F(BeatDetectionSettingsTest, ModesPersistAndLegacySettersOverrideThem) {
 
 TEST_F(BeatDetectionSettingsTest, DialogOffersOnlyExistingAnalyzersAndPersistsTempoModes) {
     DlgPrefBeats page(nullptr, config());
-    ASSERT_EQ(2, page.comboBoxBeatPlugin->count());
+    ASSERT_EQ(3, page.comboBoxBeatPlugin->count());
     ASSERT_EQ(3, page.comboBoxTempoMode->count());
     for (const auto mode : {mixxx::BeatGridMode::Auto,
                  mixxx::BeatGridMode::Constant,
@@ -64,6 +65,27 @@ TEST_F(BeatDetectionSettingsTest, RefreshDoesNotChangeSelectionsThroughSignals) 
     EXPECT_EQ(0, pluginSpy.count());
     EXPECT_EQ(0, modeSpy.count());
     EXPECT_EQ(static_cast<int>(mixxx::BeatGridMode::Variable),
+            page.comboBoxTempoMode->currentData().toInt());
+}
+
+TEST_F(BeatDetectionSettingsTest,
+        PhaseHistogramShowsItsCapabilitiesWithoutChangingLegacyPreferences) {
+    BeatDetectionSettings settings(config());
+    settings.setTempoMode(mixxx::BeatGridMode::Auto);
+    settings.setFastAnalysis(true);
+    settings.setBeatPluginId(mixxx::AnalyzerPhaseGrid::pluginInfo().id());
+    DlgPrefBeats page(nullptr, config());
+    EXPECT_FALSE(page.comboBoxTempoMode->isEnabled());
+    EXPECT_EQ(static_cast<int>(mixxx::BeatGridMode::Constant),
+            page.comboBoxTempoMode->currentData().toInt());
+    EXPECT_FALSE(page.checkBoxFastAnalysis->isEnabled());
+    EXPECT_FALSE(page.checkBoxFastAnalysis->isChecked());
+    page.slotApply();
+    EXPECT_EQ(mixxx::BeatGridMode::Auto, settings.getTempoMode());
+    EXPECT_TRUE(settings.getFastAnalysis());
+    page.comboBoxBeatPlugin->setCurrentIndex(0);
+    EXPECT_TRUE(page.comboBoxTempoMode->isEnabled());
+    EXPECT_EQ(static_cast<int>(mixxx::BeatGridMode::Auto),
             page.comboBoxTempoMode->currentData().toInt());
 }
 // End of autonomously generated AI-agent test.

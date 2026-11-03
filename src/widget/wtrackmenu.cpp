@@ -11,6 +11,7 @@
 #include "analyzer/analyzerscheduledtrack.h"
 #include "analyzer/analyzersilence.h"
 #include "analyzer/analyzertrack.h"
+#include "analyzer/plugins/analyzerphasegrid.h"
 #include "control/controlobject.h"
 #include "library/coverartutils.h"
 #include "library/dao/trackschema.h"
@@ -1147,16 +1148,20 @@ void WTrackMenu::updateMenus() {
     }
 
     if (featureIsEnabled(Feature::Analyze)) {
-        const auto mode = BeatDetectionSettings(m_pConfig).getTempoMode();
+        const BeatDetectionSettings beatSettings(m_pConfig);
+        const bool phaseGridSelected =
+                beatSettings.getBeatPluginId() == mixxx::AnalyzerPhaseGrid::pluginInfo().id();
+        const auto mode = phaseGridSelected ? mixxx::BeatGridMode::Constant
+                                            : beatSettings.getTempoMode();
         // Since we already have a 'Reanalyze' action that uses the configured
         // default, we hide the redundant menu as per suggestion:
         // https://github.com/mixxxdj/mixxx/pull/10931#issuecomment-1262559750
         m_pReanalyzeAutoBpmAction->setVisible(
-                mode != mixxx::BeatGridMode::Auto);
+                !phaseGridSelected && mode != mixxx::BeatGridMode::Auto);
         m_pReanalyzeConstBpmAction->setVisible(
                 mode != mixxx::BeatGridMode::Constant);
         m_pReanalyzeVarBpmAction->setVisible(
-                mode != mixxx::BeatGridMode::Variable);
+                !phaseGridSelected && mode != mixxx::BeatGridMode::Variable);
     }
 
     if (featureIsEnabled(Feature::Reset) ||
