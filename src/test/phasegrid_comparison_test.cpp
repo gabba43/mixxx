@@ -90,6 +90,65 @@ mixxx::BeatGridMode parseMode(const QString& mode) {
 
 class PhaseGridFileComparisonTest : public MixxxTest, private SoundSourceProviderRegistration {};
 
+TEST_F(PhaseGridFileComparisonTest, ExportConfiguredPcm) {
+    const auto input = qEnvironmentVariable("MIXXX_PHASEGRID_INPUT");
+    const auto output = qEnvironmentVariable("MIXXX_PHASEGRID_OUTPUT");
+    const auto pcmPath = qEnvironmentVariable("MIXXX_PHASEGRID_PCM");
+    if (input.isEmpty() || output.isEmpty() || pcmPath.isEmpty()) {
+        GTEST_SKIP() << "Set input, output and PCM paths for offline diagnostic export";
+    }
+    ASSERT_NE(QFileInfo(input).absoluteFilePath(), QFileInfo(pcmPath).absoluteFilePath());
+    ASSERT_NE(QFileInfo(input).absoluteFilePath(), QFileInfo(output).absoluteFilePath());
+    auto track = Track::newTemporary(input);
+    SoundSourceProxy proxy(track);
+    mixxx::AudioSource::OpenParams open;
+    open.setChannelCount(mixxx::audio::ChannelCount::stereo());
+    auto audio = proxy.openAudioSource(open);
+    ASSERT_TRUE(audio);
+    if (audio->getSignalInfo().getChannelCount() != mixxx::audio::ChannelCount::stereo()) {
+        audio = mixxx::AudioSourceStereoProxy::create(audio, kChunkFrames);
+    }
+    ASSERT_TRUE(audio);
+    ASSERT_EQ(mixxx::audio::ChannelCount::stereo(), audio->getSignalInfo().getChannelCount());
+    const auto rate = audio->getSignalInfo().getSampleRate();
+    ASSERT_TRUE(rate.isValid());
+    QFile pcm(pcmPath);
+    ASSERT_TRUE(pcm.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    mixxx::SampleBuffer buffer(kChunkFrames * 2);
+    SINT decoded = 0;
+    for (SINT position = audio->frameIndexMin(); position < audio->frameIndexMax();) {
+        const auto read = audio->readSampleFrames(mixxx::WritableSampleFrames(
+                mixxx::IndexRange::forward(
+                        position, std::min(kChunkFrames, audio->frameIndexMax() - position)),
+                mixxx::SampleBuffer::WritableSlice(buffer)));
+        const auto range = read.frameIndexRange();
+        ASSERT_FALSE(range.empty());
+        ASSERT_EQ(position, range.start());
+        ASSERT_LE(range.end(), audio->frameIndexMax());
+        const auto bytes = range.length() * 2 * static_cast<SINT>(sizeof(CSAMPLE));
+        const auto* data = reinterpret_cast<const char*>(read.readableData());
+        hash.addData(QByteArrayView(data, bytes));
+        ASSERT_EQ(bytes, pcm.write(data, bytes));
+        decoded += range.length();
+        position = range.end();
+    }
+    pcm.close();
+    QJsonObject report{{"name", QFileInfo(input).completeBaseName()},
+            {"pcm_path", QFileInfo(pcmPath).absoluteFilePath()},
+            {"sample_rate", static_cast<double>(rate.value())},
+            {"channels", 2},
+            {"decoded_frames", static_cast<double>(decoded)},
+            {"duration", static_cast<double>(decoded) / rate.value()},
+            {"source_sha256", fileSha256(input)},
+            {"pcm_sha256", QString::fromLatin1(hash.result().toHex())},
+            {"pcm_format", "native-endian float32 interleaved stereo"}};
+    QFile metadata(output);
+    ASSERT_TRUE(metadata.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const auto json = QJsonDocument(report).toJson(QJsonDocument::Indented);
+    ASSERT_EQ(json.size(), metadata.write(json));
+}
+
 TEST_F(PhaseGridFileComparisonTest, AnalyzeConfiguredFile) {
     const auto input = qEnvironmentVariable("MIXXX_PHASEGRID_INPUT");
     const auto output = qEnvironmentVariable("MIXXX_PHASEGRID_OUTPUT");

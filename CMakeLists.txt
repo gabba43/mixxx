@@ -1202,6 +1202,8 @@ add_library(
   lib/phasegrid/transient_detector.cpp
   lib/phasegrid/phase_grid_core.cpp
   lib/phasegrid/analysis_pipeline.cpp
+  lib/phasegrid/completion.cpp
+  lib/phasegrid/multiband_detector.cpp
 )
 set_target_properties(
   mixxx-phasegrid
@@ -1240,6 +1242,10 @@ foreach(
   phase_grid_core.cpp
   analysis_pipeline.h
   analysis_pipeline.cpp
+  completion.h
+  completion.cpp
+  multiband_detector.h
+  multiband_detector.cpp
 )
   set(
     phasegrid_source_path
@@ -3210,7 +3216,14 @@ if(BUILD_TESTING)
   include(GoogleTest)
   enable_testing()
 
-  foreach(phasegrid_suite transient_detector phase_grid_core analysis_pipeline)
+  foreach(
+    phasegrid_suite
+    transient_detector
+    phase_grid_core
+    analysis_pipeline
+    completion
+    multiband_detector
+  )
     add_executable(
       phasegrid-${phasegrid_suite}-test
       "lib/phasegrid/tests/${phasegrid_suite}_test.cpp"
@@ -3244,6 +3257,28 @@ if(BUILD_TESTING)
     )
     add_dependencies(mixxx-test phasegrid-${phasegrid_suite}-test)
   endforeach()
+
+  add_executable(
+    phasegrid-completion-probe
+    tools/phasegrid_completion_probe.cpp
+  )
+  target_link_libraries(phasegrid-completion-probe PRIVATE mixxx-phasegrid)
+  target_include_directories(
+    phasegrid-completion-probe
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/lib/phasegrid"
+  )
+  set_target_properties(
+    phasegrid-completion-probe
+    PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF
+  )
+  if(MSVC)
+    target_compile_options(phasegrid-completion-probe PRIVATE /fp:precise)
+  else()
+    target_compile_options(
+      phasegrid-completion-probe
+      PRIVATE -ffp-contract=on -fno-fast-math -fno-lto
+    )
+  endif()
 
   file(
     GLOB_RECURSE CONTROLLER_BULK_MAPPING_LIST

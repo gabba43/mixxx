@@ -8,6 +8,13 @@ test files were copied byte-for-byte. [SOURCE_MANIFEST.json](SOURCE_MANIFEST.jso
 records their original and vendored SHA-256 hashes and identifies this snapshot.
 The manifest and this README are integration metadata added beside those files.
 
+The later `multiband_detector.*` and `completion.*` files are separate proposed
+completion modules, outside that frozen snapshot. Their purpose, validation and
+explicit Constant/Strict semantics are documented in
+[PHASEGRID_COMPLETION.md](../../PHASEGRID_COMPLETION.md). The native analyzer now
+uses these modules; the original front end and pipeline remain available to the
+standalone comparison probe. The ten manifest-listed files stay unchanged.
+
 This is an **experimental independent implementation**, not recovered original
 source or a proven output-equivalent reconstruction of the analyzed program.
 No raw decompiler output, assembly listing, original binary, model, worker or

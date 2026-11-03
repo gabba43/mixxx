@@ -9,21 +9,21 @@
 #include <cmath>
 #include <exception>
 
-#include "analysis_pipeline.h"
-#include "transient_detector.h"
+#include "completion.h"
+#include "multiband_detector.h"
 
 namespace mixxx {
 namespace {
 
-phasegrid::PipelineConfig pipelineConfig() {
-    phasegrid::PipelineConfig config;
-    config.search_plan = phasegrid::decompiled_radius_one_plan();
+phasegrid::CompletionConfig pipelineConfig() {
+    phasegrid::CompletionConfig config;
+    config.acceptance_mode = phasegrid::AcceptanceMode::BestFitConstant;
     return config;
 }
 
 QJsonObject configuration(audio::SampleRate sampleRate, audio::ChannelCount sourceChannels) {
     const auto pipeline = pipelineConfig();
-    const phasegrid::TransientDetector::Config frontend;
+    const phasegrid::MultibandDetector::Config frontend;
     QJsonArray stages;
     for (const auto& stage : pipeline.search_plan) {
         stages.append(QJsonArray{stage.half_width_bpm,
@@ -31,7 +31,7 @@ QJsonObject configuration(audio::SampleRate sampleRate, audio::ChannelCount sour
                 static_cast<double>(stage.bins),
                 static_cast<int>(stage.endpoints)});
     }
-    return {{QStringLiteral("adapter"), QStringLiteral("native-constant-result-v1")},
+    return {{QStringLiteral("adapter"), QStringLiteral("native-constant-result-v2")},
             {QStringLiteral("floating_point"), QStringLiteral("strict-no-fastmath-v1")},
             {QStringLiteral("sample_rate"), static_cast<double>(sampleRate.value())},
             {QStringLiteral("source_channels"), static_cast<int>(sourceChannels.value())},
@@ -47,7 +47,15 @@ QJsonObject configuration(audio::SampleRate sampleRate, audio::ChannelCount sour
             {QStringLiteral("local_window"), pipeline.window_seconds},
             {QStringLiteral("local_hop"), pipeline.hop_seconds},
             {QStringLiteral("minimum_events"), static_cast<double>(pipeline.minimum_events)},
-            {QStringLiteral("minimum_peak_fraction"), pipeline.minimum_peak_fraction},
+            {QStringLiteral("phase_tolerance_seconds"), pipeline.phase_tolerance_seconds},
+            {QStringLiteral("acceptance_mode"), QStringLiteral("explicit-constant-best-fit")},
+            {QStringLiteral("minimum_normalized_support"), pipeline.minimum_normalized_support},
+            {QStringLiteral("minimum_support_significance"), pipeline.minimum_support_significance},
+            {QStringLiteral("minimum_supported_section_fraction"),
+                    pipeline.minimum_supported_section_fraction},
+            {QStringLiteral("minimum_phase_retention"), pipeline.minimum_phase_retention},
+            {QStringLiteral("maximum_refinements"),
+                    static_cast<double>(pipeline.maximum_refinements)},
             {QStringLiteral("search_stages"), stages}};
 }
 
@@ -55,8 +63,8 @@ QJsonObject configuration(audio::SampleRate sampleRate, audio::ChannelCount sour
 
 class AnalyzerPhaseGrid::Impl {
   public:
-    phasegrid::TransientDetector detector;
-    phasegrid::AnalysisCandidate candidate;
+    phasegrid::MultibandDetector detector;
+    phasegrid::CompletionResult candidate;
     audio::SampleRate sampleRate;
     bool initialized = false;
     bool finalized = false;
@@ -84,17 +92,16 @@ QHash<QString, QString> AnalyzerPhaseGrid::extraVersionInfo(
             QJsonDocument(configuration(sampleRate, sourceChannels)).toJson(QJsonDocument::Compact);
     QHash<QString, QString> result{
             {QStringLiteral("phase_grid_core"), QStringLiteral("portable-phasegrid-v1")},
-            {QStringLiteral("phase_grid_frontend"), QStringLiteral("rms-difference-v1")},
-            {QStringLiteral("phase_grid_policy"),
-                    QString::fromStdString(phasegrid::proposed_count_only_policies().version)},
+            {QStringLiteral("phase_grid_frontend"), QStringLiteral("multiband-energy-flux-v2")},
+            {QStringLiteral("phase_grid_policy"), QStringLiteral("physical-grid-support-v2")},
             {QStringLiteral("phase_grid_search"),
-                    QStringLiteral("decompiled-radius-one-shifted-v1")},
+                    QStringLiteral("multi-candidate-recovered-refinement-v2")},
             {QStringLiteral("phase_grid_config"),
                     QString::fromLatin1(
                             QCryptographicHash::hash(serialized, QCryptographicHash::Sha256)
                                     .toHex())},
             {QStringLiteral("phase_grid_acceptance"),
-                    QStringLiteral("explicit-experimental-constant-v1")}};
+                    QStringLiteral("explicit-constant-best-fit-v2")}};
 #ifdef MIXXX_PHASEGRID_SOURCE_FINGERPRINT
     result.insert(QStringLiteral("phase_grid_source"),
             QStringLiteral(MIXXX_PHASEGRID_SOURCE_FINGERPRINT));
@@ -108,7 +115,7 @@ bool AnalyzerPhaseGrid::initialize(audio::SampleRate sampleRate) {
         return m_pImpl->reject(QStringLiteral("invalid sample rate"));
     }
     m_pImpl->sampleRate = sampleRate;
-    phasegrid::TransientDetector::Config config;
+    phasegrid::MultibandDetector::Config config;
     config.sample_rate = sampleRate.value();
     config.channels = 2;
     try {
@@ -151,22 +158,19 @@ bool AnalyzerPhaseGrid::finalize() {
         if (!(duration > 0)) {
             return m_pImpl->reject(QStringLiteral("no audio frames"));
         }
-        m_pImpl->candidate = phasegrid::analyze_transients(m_pImpl->detector.transients(),
-                duration,
-                pipelineConfig(),
-                phasegrid::proposed_count_only_policies());
+        m_pImpl->candidate = phasegrid::complete_analysis(
+                m_pImpl->detector.transients(), duration, pipelineConfig());
     } catch (const std::exception& error) {
         return m_pImpl->reject(QString::fromUtf8(error.what()));
     }
 
     const auto& result = m_pImpl->candidate;
     const auto config = pipelineConfig();
-    if (result.status != phasegrid::AnalysisStatus::Candidate || !result.bpm ||
+    if (result.status != phasegrid::CompletionStatus::Accepted || !result.bpm ||
             !result.beat_phase_seconds || !std::isfinite(*result.bpm) ||
             !std::isfinite(*result.beat_phase_seconds) || *result.bpm < config.minimum_bpm ||
             *result.bpm > config.maximum_bpm || *result.beat_phase_seconds < 0 ||
-            *result.beat_phase_seconds >= 60.0 / *result.bpm || !result.refinement ||
-            !result.local_votes) {
+            *result.beat_phase_seconds >= 60.0 / *result.bpm || result.local_evidence.empty()) {
         m_pImpl->reject(QStringLiteral("no admissible experimental constant candidate"));
         qWarning() << "Phase Histogram analysis declined:"
                    << QJsonDocument(diagnostics()).toJson(QJsonDocument::Compact);
@@ -197,18 +201,48 @@ QJsonObject AnalyzerPhaseGrid::diagnostics() const {
                     static_cast<double>(m_pImpl->detector.transients().size())},
             {QStringLiteral("local_windows"),
                     static_cast<double>(m_pImpl->candidate.local_windows)},
-            {QStringLiteral("local_votes"), static_cast<double>(m_pImpl->candidate.local_votes)},
+            {QStringLiteral("local_votes"),
+                    static_cast<double>(m_pImpl->candidate.local_evidence.size())},
             {QStringLiteral("phase_support"),
-                    static_cast<double>(m_pImpl->candidate.phase_support)},
+                    static_cast<double>(m_pImpl->candidate.support.supported_beats)},
             {QStringLiteral("error"), m_pImpl->error},
-            {QStringLiteral("policy"), QStringLiteral("proposed-count-only-v1")},
-            {QStringLiteral("search"), QStringLiteral("decompiled-radius-one-shifted-v1")},
+            {QStringLiteral("policy"), QStringLiteral("physical-grid-support-v2")},
+            {QStringLiteral("frontend"), QStringLiteral("multiband-energy-flux-v2")},
+            {QStringLiteral("search"), QStringLiteral("multi-candidate-recovered-refinement-v2")},
             {QStringLiteral("original_equivalence"), false}};
     QJsonArray messages;
     for (const auto& message : m_pImpl->candidate.diagnostics) {
         messages.append(QString::fromStdString(message));
     }
     result.insert(QStringLiteral("messages"), messages);
+    const auto& support = m_pImpl->candidate.support;
+    result.insert(QStringLiteral("weighted_support"), support.weighted_fraction);
+    result.insert(QStringLiteral("expected_background"), support.expected_background_fraction);
+    result.insert(QStringLiteral("normalized_support"), support.normalized_support);
+    result.insert(QStringLiteral("support_significance"), support.significance);
+    result.insert(QStringLiteral("effective_events"), support.effective_events);
+    result.insert(QStringLiteral("constant_supported"), m_pImpl->candidate.constant_supported);
+    result.insert(QStringLiteral("best_fit_estimate"), m_pImpl->candidate.best_fit_estimate);
+    result.insert(QStringLiteral("rhythmic_coverage"), m_pImpl->candidate.rhythmic_coverage);
+    QJsonArray candidates;
+    for (const auto& candidate : m_pImpl->candidate.candidates) {
+        QJsonArray reasons;
+        for (const auto& reason : candidate.rejection_reasons) {
+            reasons.append(QString::fromStdString(reason));
+        }
+        candidates.append(QJsonObject{{QStringLiteral("bpm"), candidate.bpm},
+                {QStringLiteral("phase_seconds"), candidate.beat_phase_seconds},
+                {QStringLiteral("accepted"), candidate.accepted},
+                {QStringLiteral("constant_supported"), candidate.constant_supported},
+                {QStringLiteral("best_fit_estimate"), candidate.best_fit_estimate},
+                {QStringLiteral("rhythmic_coverage"), candidate.rhythmic_coverage},
+                {QStringLiteral("score"), candidate.score},
+                {QStringLiteral("supported_section_fraction"),
+                        candidate.supported_section_fraction},
+                {QStringLiteral("phase_retention"), candidate.phase_retention},
+                {QStringLiteral("quality_notes"), reasons}});
+    }
+    result.insert(QStringLiteral("candidates"), candidates);
     if (m_pImpl->candidate.refinement && !m_pImpl->candidate.refinement->stages.empty()) {
         const auto& refined = *m_pImpl->candidate.refinement;
         result.insert(QStringLiteral("refined_bpm"), refined.bpm);

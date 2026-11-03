@@ -149,10 +149,14 @@ TEST(PhaseGridPluginTest, InvalidInputPoisonsTheRunAndNeverExposesAPartialGrid) 
 TEST(PhaseGridPluginTest, MetadataFingerprintsNativeFrontendAndExperimentalCoreConfiguration) {
     const auto version = mixxx::AnalyzerPhaseGrid::extraVersionInfo(
             mixxx::audio::SampleRate(kRate), mixxx::audio::ChannelCount::stereo());
-    EXPECT_EQ(QStringLiteral("proposed-count-only-v1"),
+    EXPECT_EQ(QStringLiteral("physical-grid-support-v2"),
             version.value(QStringLiteral("phase_grid_policy")));
-    EXPECT_EQ(QStringLiteral("decompiled-radius-one-shifted-v1"),
+    EXPECT_EQ(QStringLiteral("multi-candidate-recovered-refinement-v2"),
             version.value(QStringLiteral("phase_grid_search")));
+    EXPECT_EQ(QStringLiteral("multiband-energy-flux-v2"),
+            version.value(QStringLiteral("phase_grid_frontend")));
+    EXPECT_EQ(QStringLiteral("explicit-constant-best-fit-v2"),
+            version.value(QStringLiteral("phase_grid_acceptance")));
     EXPECT_EQ(64, version.value(QStringLiteral("phase_grid_config")).size());
     EXPECT_NE(version,
             mixxx::AnalyzerPhaseGrid::extraVersionInfo(
@@ -206,14 +210,53 @@ TEST_F(PhaseGridAnalyzerTest, FullTrackIncludesEvidenceAfterTheLegacyFastCutoff)
     BeatDetectionSettings settings(config());
     settings.setTempoMode(mixxx::BeatGridMode::Constant);
     settings.setFastAnalysis(true);
-    const auto pTrack = track(72);
+    const auto pTrack = track(200);
     AnalyzerBeats analyzer(config());
     ASSERT_TRUE(initialize(&analyzer, pTrack));
-    ASSERT_TRUE(feed(&analyzer, pulses(kRate, 72, 65.2137)));
+    ASSERT_TRUE(feed(&analyzer, pulses(kRate, 200, 65.2137)));
     analyzer.storeResults(pTrack);
     analyzer.cleanup();
     ASSERT_TRUE(pTrack->getBeats());
     EXPECT_NEAR(120, pTrack->getBpm(), 0.03);
+}
+
+TEST(PhaseGridPluginTest, BoundaryPhaseProducesAUsableGrid) {
+    for (double origin : {0.0001, 0.4999}) {
+        SCOPED_TRACE(origin);
+        const auto audio = pulses(44100, kDuration, origin);
+        mixxx::AnalyzerPhaseGrid plugin;
+        ASSERT_TRUE(plugin.initialize(mixxx::audio::SampleRate(44100)));
+        ASSERT_TRUE(plugin.processSamples(audio.data(), static_cast<SINT>(audio.size())));
+        ASSERT_TRUE(plugin.finalize());
+        const auto grid = plugin.resolvedBeatGrid(QString());
+        ASSERT_TRUE(grid);
+        const double phase =
+                plugin.diagnostics().value(QStringLiteral("absolute_phase_seconds")).toDouble();
+        EXPECT_GE(phase, 0);
+        EXPECT_LT(phase,
+                60 /
+                        grid->getBpmInRange(mixxx::audio::kStartFramePos,
+                                    mixxx::audio::FramePos(44100 * kDuration))
+                                .value());
+        EXPECT_NEAR(0, std::remainder(phase - origin, 0.5), 0.015);
+    }
+}
+
+TEST(PhaseGridPluginTest, ExplicitConstantModeMarksAnApproximationAcrossTempoChange) {
+    auto audio = pulses();
+    const auto changed = pulses(kRate, kDuration, 12 + kOrigin, 138);
+    const auto midpoint = 12 * kRate * 2;
+    std::copy(changed.begin() + midpoint, changed.end(), audio.begin() + midpoint);
+    mixxx::AnalyzerPhaseGrid plugin;
+    ASSERT_TRUE(plugin.initialize(mixxx::audio::SampleRate(kRate)));
+    ASSERT_TRUE(plugin.processSamples(audio.data(), static_cast<SINT>(audio.size())));
+    ASSERT_TRUE(plugin.finalize());
+    const auto grid = plugin.resolvedBeatGrid(QString());
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    const auto diagnostics = plugin.diagnostics();
+    EXPECT_TRUE(diagnostics.value(QStringLiteral("best_fit_estimate")).toBool());
+    EXPECT_FALSE(diagnostics.value(QStringLiteral("constant_supported")).toBool());
 }
 
 TEST_F(PhaseGridAnalyzerTest, MonoAndDuplicatedStereoHaveTheSameResolvedGrid) {

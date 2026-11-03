@@ -2,6 +2,10 @@
 
 # Native Integration der experimentellen Phasenhistogramm-Analyse
 
+Dieser Bericht beschreibt den ersten Integrationsstand `cd0af73153` und dessen
+Messungen. Die anschließende Korrektur der ergänzten Pipeline steht in
+[PHASEGRID_COMPLETION.md](PHASEGRID_COMPLETION.md).
+
 Die portable Referenz ist als **zusätzlicher, ausdrücklich auswählbarer nativer
 Analyzer** eingebunden. Ihre ID ist `phase-histogram:1`; in der Oberfläche heißt
 sie `Phase Histogram (Experimental, constant tempo)`. Queen Mary bleibt der
