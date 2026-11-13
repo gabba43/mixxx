@@ -143,14 +143,18 @@ class PulseHistogram {
         return m_width;
     }
 
-    std::vector<double> measure(const PreparedBand& band) const {
+    std::vector<double> measure(
+            const PreparedBand& band,
+            double center = 0,
+            double warpFactor = 0) const {
         std::vector<double> histogram(m_count, 0);
         if (band.events.size() < 8) {
             return histogram;
         }
         for (const auto& event : band.events) {
+            const double time = event.time + (event.time - center) * warpFactor;
             const auto bin = std::min(m_count - 1,
-                    static_cast<int>(std::floor(wrap(event.time, m_period) / m_width)));
+                    static_cast<int>(std::floor(wrap(time, m_period) / m_width)));
             histogram[bin] += event.weight;
         }
         const int radius = static_cast<int>(m_kernel.size() / 2);
@@ -181,6 +185,21 @@ class PulseHistogram {
                 result.fullMatchedFraction =
                         maximum * (kWindowSeconds / m_period + total) / (2 * total);
             }
+        }
+        return result;
+    }
+
+    double foldedScore(const Window& window, double warpFactor = 0) const {
+        double result = 0;
+        for (size_t band = 0; band < kBands.size(); ++band) {
+            const auto histogram =
+                    measure(window.bands[band], window.center, warpFactor);
+            double maximum = 0;
+            const size_t half = histogram.size() / 2;
+            for (size_t i = 0; i < half; ++i) {
+                maximum = std::max(maximum, std::max(histogram[i], histogram[i + half]));
+            }
+            result += kBandWeights[band] * maximum;
         }
         return result;
     }
@@ -219,21 +238,55 @@ Family measureFamily(const std::vector<Window>& windows, double seed, double rat
     return family;
 }
 
-std::vector<double> recoverCircularPhase(const std::vector<std::vector<double>>& likelihoods,
-        double period) {
+std::vector<double> computeWarpFactors(
+        const std::vector<Window>& windows,
+        const PulseHistogram& histogram,
+        double bpm) {
+    std::vector<double> rawWarps(windows.size(), 0);
+    std::vector<bool> supported(windows.size(), false);
+    for (size_t i = 0; i < windows.size(); ++i) {
+        const double baseScore = histogram.foldedScore(windows[i], 0);
+        double bestScore = baseScore;
+        double bestWarp = 0;
+        for (double localBpm = bpm * 0.975;
+                localBpm <= bpm * 1.025 + 0.0001;
+                localBpm += 0.05) {
+            const double warp = (localBpm - bpm) / bpm;
+            const double candidateScore =
+                    histogram.foldedScore(windows[i], warp);
+            if (candidateScore > bestScore) {
+                bestScore = candidateScore;
+                bestWarp = warp;
+            }
+        }
+        if (bestScore > baseScore + 0.04 && std::abs(bestWarp) >= 0.0035) {
+            rawWarps[i] = bestWarp;
+            supported[i] = true;
+        }
+    }
+    std::vector<double> warps(windows.size(), 0);
+    for (size_t i = 0; i < windows.size(); ++i) {
+        if (!supported[i]) {
+            continue;
+        }
+        const bool leftAgrees =
+                i > 0 && supported[i - 1] && rawWarps[i - 1] * rawWarps[i] > 0;
+        const bool rightAgrees = i + 1 < windows.size() && supported[i + 1] &&
+                rawWarps[i + 1] * rawWarps[i] > 0;
+        if (leftAgrees || rightAgrees) {
+            warps[i] = rawWarps[i];
+        }
+    }
+    return warps;
+}
+
+std::vector<double> recoverCircularPhase(
+        const std::vector<std::vector<double>>& likelihoods,
+        double period,
+        const std::vector<double>& expectedDeltas) {
     const size_t count = likelihoods.front().size();
     const double cycle = period / 2;
     const double width = cycle / count;
-    std::vector<std::vector<double>> transition(count, std::vector<double>(count));
-    for (size_t current = 0; current < count; ++current) {
-        for (size_t previous = 0; previous < count; ++previous) {
-            const double delta = wrap((static_cast<double>(current) - previous) * width +
-                                                 cycle / 2,
-                                         cycle) -
-                    cycle / 2;
-            transition[current][previous] = 0.025 * delta * delta / (0.020 * 0.020);
-        }
-    }
     std::vector<double> costs(count);
     std::transform(likelihoods.front().begin(),
             likelihoods.front().end(),
@@ -241,11 +294,18 @@ std::vector<double> recoverCircularPhase(const std::vector<std::vector<double>>&
             [](double score) { return -score; });
     std::vector<std::vector<size_t>> backs;
     for (size_t window = 1; window < likelihoods.size(); ++window) {
+        const double expected =
+                window < expectedDeltas.size() ? expectedDeltas[window] : 0;
         std::vector<double> next(count, std::numeric_limits<double>::infinity());
         std::vector<size_t> back(count);
         for (size_t current = 0; current < count; ++current) {
             for (size_t previous = 0; previous < count; ++previous) {
-                const double cost = costs[previous] + transition[current][previous];
+                const double delta = wrap((static_cast<double>(current) - previous) * width -
+                                             expected + cycle / 2,
+                                     cycle) -
+                        cycle / 2;
+                const double cost =
+                        costs[previous] + 0.025 * delta * delta / (0.020 * 0.020);
                 if (cost < next[current]) {
                     next[current] = cost;
                     back[current] = previous;
@@ -264,9 +324,12 @@ std::vector<double> recoverCircularPhase(const std::vector<std::vector<double>>&
     std::vector<double> phase(states.size());
     phase.front() = (states.front() + 0.5) * width;
     for (size_t window = 1; window < states.size(); ++window) {
+        const double expected =
+                window < expectedDeltas.size() ? expectedDeltas[window] : 0;
         const double difference =
                 (static_cast<double>(states[window]) - states[window - 1]) * width;
-        phase[window] = phase[window - 1] + wrap(difference + cycle / 2, cycle) - cycle / 2;
+        phase[window] = phase[window - 1] + expected +
+                wrap(difference - expected + cycle / 2, cycle) - cycle / 2;
     }
     return phase;
 }
@@ -368,20 +431,24 @@ struct BandClock {
     std::vector<bool> reliable;
     double intercept;
     double slope;
+    double span;
 };
 
 std::optional<BandClock> recoverBand(const std::vector<Window>& windows,
         const PulseHistogram& histogram,
         size_t band,
         double period,
-        double duration) {
+        double duration,
+        const std::vector<double>& warpFactors) {
     std::vector<std::vector<double>> likelihoods;
     std::vector<double> weights;
     std::vector<bool> reliable;
     bool firstHalf = false;
     bool secondHalf = false;
-    for (const auto& window : windows) {
-        const auto measured = histogram.measure(window.bands[band]);
+    for (size_t windowIndex = 0; windowIndex < windows.size(); ++windowIndex) {
+        const auto& window = windows[windowIndex];
+        const double warp = windowIndex < warpFactors.size() ? warpFactors[windowIndex] : 0;
+        const auto measured = histogram.measure(window.bands[band], window.center, warp);
         std::vector<double> folded(measured.size() / 2);
         for (size_t i = 0; i < folded.size(); ++i) {
             folded[i] = std::max(measured[i], measured[i + folded.size()]);
@@ -402,8 +469,25 @@ std::optional<BandClock> recoverBand(const std::vector<Window>& windows,
     for (auto& weight : weights) {
         weight /= median;
     }
-    const auto rawPhase = recoverCircularPhase(likelihoods, period);
-    const auto phase = smoothPhase(rawPhase, weights);
+    std::vector<double> expectedDeltas(windows.size(), 0);
+    for (size_t i = 1; i < windows.size() && i < warpFactors.size(); ++i) {
+        const double avgWarp = 0.5 * (warpFactors[i - 1] + warpFactors[i]);
+        expectedDeltas[i] = -kHopSeconds * avgWarp / (1 + avgWarp);
+    }
+    const auto rawPhase = recoverCircularPhase(likelihoods, period, expectedDeltas);
+    std::vector<double> expectedPhase(rawPhase.size(), 0);
+    for (size_t i = 1; i < expectedPhase.size(); ++i) {
+        expectedPhase[i] = expectedPhase[i - 1] + expectedDeltas[i];
+    }
+    std::vector<double> rawResidual(rawPhase.size());
+    for (size_t i = 0; i < rawPhase.size(); ++i) {
+        rawResidual[i] = rawPhase[i] - expectedPhase[i];
+    }
+    const auto smoothedResidual = smoothPhase(rawResidual, weights);
+    std::vector<double> phase(rawPhase.size());
+    for (size_t i = 0; i < rawPhase.size(); ++i) {
+        phase[i] = smoothedResidual[i] + expectedPhase[i];
+    }
     std::vector<double> errors;
     auto lineWeights = weights;
     for (size_t i = 0; i < weights.size(); ++i) {
@@ -411,10 +495,16 @@ std::optional<BandClock> recoverBand(const std::vector<Window>& windows,
         lineWeights[i] *= std::min(1.0, 0.015 / std::max(errors[i], 1e-12));
     }
     const auto [intercept, slope] = fitLine(windows, phase, lineWeights);
-    if (!std::isfinite(slope) || std::abs(slope) > 0.02) {
+    if (!std::isfinite(slope) || std::abs(slope) > 0.03) {
         return std::nullopt;
     }
-    return BandClock{phase, weights, errors, reliable, intercept, slope};
+    std::vector<double> residuals(windows.size());
+    for (size_t i = 0; i < windows.size(); ++i) {
+        residuals[i] = phase[i] - intercept - slope * windows[i].center;
+    }
+    const double span = weightedQuantile(residuals, lineWeights, 0.95) -
+            weightedQuantile(residuals, lineWeights, 0.05);
+    return BandClock{phase, weights, errors, reliable, intercept, slope, span};
 }
 
 struct ConsensusClock {
@@ -430,6 +520,7 @@ struct ConsensusClock {
 std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows,
         const BandClock& first,
         const BandClock& second,
+        double period,
         double duration) {
     std::vector<double> weights(windows.size());
     size_t reliableCount = 0;
@@ -446,8 +537,24 @@ std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows
     if (reliableCount < 4 || latest - earliest < duration / 2) {
         return std::nullopt;
     }
-    const auto [firstIntercept, firstSlope] = fitLine(windows, first.phase, weights);
+    const double cycle = period / 2;
+    std::vector<double> rawDiffs(windows.size());
+    for (size_t i = 0; i < windows.size(); ++i) {
+        rawDiffs[i] = first.phase[i] - second.phase[i];
+    }
+    const double medianDiff = weightedQuantile(rawDiffs, weights, 0.5);
+    std::vector<double> firstPhase = first.phase;
+    for (size_t i = 0; i < windows.size(); ++i) {
+        const double diff = firstPhase[i] - second.phase[i] - medianDiff;
+        if (std::abs(diff) > cycle * 0.75) {
+            firstPhase[i] -= std::round(diff / cycle) * cycle;
+        }
+    }
+    const auto [firstIntercept, firstSlope] = fitLine(windows, firstPhase, weights);
     const auto [secondIntercept, secondSlope] = fitLine(windows, second.phase, weights);
+    const double lag = wrap(firstIntercept - secondIntercept + cycle / 2, cycle) - cycle / 2;
+    const double baseIntercept =
+            (lag >= 0.015 && lag <= 0.060) ? (firstIntercept - lag) : firstIntercept;
     std::vector<double> residuals;
     std::vector<double> phase;
     double covariance = 0;
@@ -456,7 +563,7 @@ std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows
     const double slope = (firstSlope + secondSlope) / 2;
     for (size_t i = 0; i < windows.size(); ++i) {
         const double firstResidual =
-                first.phase[i] - firstIntercept - firstSlope * windows[i].center;
+                firstPhase[i] - firstIntercept - firstSlope * windows[i].center;
         const double secondResidual =
                 second.phase[i] - secondIntercept - secondSlope * windows[i].center;
         const double residual = (firstResidual + secondResidual) / 2;
@@ -464,7 +571,7 @@ std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows
         firstVariance += weights[i] * firstResidual * firstResidual;
         secondVariance += weights[i] * secondResidual * secondResidual;
         residuals.push_back(residual);
-        phase.push_back(firstIntercept + slope * windows[i].center + residual);
+        phase.push_back(baseIntercept + slope * windows[i].center + residual);
     }
     const double span = weightedQuantile(residuals, weights, 0.95) -
             weightedQuantile(residuals, weights, 0.05);
@@ -473,7 +580,7 @@ std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows
     const double correlation =
             covariance / std::sqrt(std::max(1e-24, firstVariance * secondVariance));
     return ConsensusClock{phase,
-            firstIntercept,
+            baseIntercept,
             slope,
             span,
             std::max(0.012, 3 * noise),
@@ -484,22 +591,32 @@ std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows
 std::optional<ConsensusClock> recoverConsensus(const std::vector<Window>& windows,
         const PulseHistogram& histogram,
         double period,
-        double duration) {
+        double duration,
+        const std::vector<double>& warpFactors) {
     std::array<std::optional<BandClock>, kBands.size()> clocks;
     for (size_t band = 0; band < clocks.size(); ++band) {
-        clocks[band] = recoverBand(windows, histogram, band, period, duration);
+        clocks[band] = recoverBand(windows, histogram, band, period, duration, warpFactors);
     }
     if (clocks[2]) {
-        for (const size_t band : {size_t(1), size_t(0)}) {
-            if (clocks[band]) {
-                auto consensus = correlateClocks(windows, *clocks[band], *clocks[2], duration);
-                if (consensus) {
-                    return consensus;
-                }
-            }
+        auto consensus12 = clocks[1]
+                ? correlateClocks(windows, *clocks[1], *clocks[2], period, duration)
+                : std::nullopt;
+        auto consensus02 = clocks[0]
+                ? correlateClocks(windows, *clocks[0], *clocks[2], period, duration)
+                : std::nullopt;
+        if (consensus12 && consensus02 && clocks[0]->span <= 0.018 &&
+                consensus12->span > consensus12->threshold &&
+                consensus02->correlation <= 0.6) {
+            return consensus02;
+        }
+        if (consensus12) {
+            return consensus12;
+        }
+        if (consensus02) {
+            return consensus02;
         }
     } else if (clocks[0] && clocks[1]) {
-        return correlateClocks(windows, *clocks[0], *clocks[1], duration);
+        return correlateClocks(windows, *clocks[0], *clocks[1], period, duration);
     }
     return std::nullopt;
 }
@@ -550,7 +667,9 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
         if (candidate == reference) {
             continue;
         }
-        const double cost = 0.055 + 0.04 * std::abs(std::log2(family.ratio));
+        if (referenceBpm >= 60 && referenceBpm * family.ratio > 215) {
+            continue;
+        }
         double dominance = 0;
         double corroboration = 0;
         for (size_t window = 0; window < windows.size(); ++window) {
@@ -563,6 +682,10 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
                 corroboration += weights[window] / totalWeight;
             }
         }
+        const bool subNormalDouble =
+                referenceBpm < 85 && family.ratio == 2 && dominance > 0.75 && corroboration > 0.75;
+        const double cost =
+                subNormalDouble ? 0.055 : (0.055 + 0.04 * std::abs(std::log2(family.ratio)));
         const double utility = family.meanScore - cost;
         if (dominance > 0.55 && corroboration > 0.55 && utility > bestUtility) {
             bestUtility = utility;
@@ -576,11 +699,16 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
     const double bpm = weightedQuantile(family.tempos, weights, 0.5);
     const double period = 60 / bpm;
     const PulseHistogram histogram(bpm);
+    const auto warpFactors = computeWarpFactors(windows, histogram, bpm);
     auto consensus = attacks
-            ? recoverConsensus(prepareWindows(*attacks, duration), histogram, period, duration)
+            ? recoverConsensus(
+                      prepareWindows(*attacks, duration), histogram, period, duration, warpFactors)
             : std::nullopt;
-    if (!consensus) {
-        consensus = recoverConsensus(windows, histogram, period, duration);
+    if (!consensus || (consensus->span > consensus->threshold && consensus->correlation <= 0.6)) {
+        auto bodyConsensus = recoverConsensus(windows, histogram, period, duration, warpFactors);
+        if (!consensus || (bodyConsensus && bodyConsensus->correlation > 0.8)) {
+            consensus = bodyConsensus;
+        }
     }
     if (!consensus) {
         return std::nullopt;

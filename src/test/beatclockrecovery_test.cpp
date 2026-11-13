@@ -339,4 +339,81 @@ TEST(BeatClockRecoveryTest, RecoversOtherTemposWithMissingPulsesAndLocalHarmonic
         EXPECT_LT(error / count, 0.012);
     }
 }
+
+TEST(BeatClockRecoveryTest, TracksLateTempoAccelerationExceedingHalfPeriodPerHop) {
+    const auto warp = [](double time) {
+        if (time <= 150) {
+            return 0.0;
+        }
+        const double u = (time - 150) / (kDuration - 150);
+        return -0.95 * u * u;
+    };
+    const auto clock = mixxx::recoverBeatClock(makeEvents(warp), kBpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_NEAR(clock->harmonicRatio, 1, 1e-8);
+    EXPECT_FALSE(clock->constant);
+    EXPECT_GT(clock->driftSeconds, 0.15);
+    double error = 0;
+    int count = 0;
+    for (int beat = 20; beat < 510; ++beat) {
+        const double base = kOrigin + beat * 60 / kBpm;
+        const double target = base + warp(base);
+        if (target >= kDuration - 8) {
+            break;
+        }
+        error += nearestBeatError(clock->beatTimes, target);
+        ++count;
+    }
+    ASSERT_GT(count, 100);
+    EXPECT_LT(error / count, 0.015);
+}
+
+TEST(BeatClockRecoveryTest, RejectsDoubleHarmonicAbovePlausibleTempoCeiling) {
+    Events fastEvents;
+    constexpr double fastBpm = 136;
+    for (int sixteenth = 0;; ++sixteenth) {
+        const double time = kOrigin + sixteenth * 15 / fastBpm;
+        if (time >= kDuration) {
+            break;
+        }
+        for (size_t band = 0; band < fastEvents.size(); ++band) {
+            if (sixteenth % 2 == 0) {
+                fastEvents[band].push_back({time, 1.0});
+            } else if (band >= 2) {
+                fastEvents[band].push_back({time, 0.45});
+            }
+        }
+    }
+    const auto clock = mixxx::recoverBeatClock(fastEvents, fastBpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_NEAR(clock->harmonicRatio, 1, 1e-8);
+    EXPECT_NEAR(clock->bpm, fastBpm, 0.05);
+}
+
+TEST(BeatClockRecoveryTest, SteadyBassClockRejectsUncorroboratedMidPercussionExcursion) {
+    auto events = makeEvents();
+    const auto excursion = makeEvents([](double time) {
+        return time >= 70 && time <= 160
+                ? 0.065 * std::sin(2 * std::acos(-1.0) * (time - 70) / 90)
+                : 0.0;
+    });
+    events[1] = excursion[1];
+    for (auto& event : events[2]) {
+        if (event.time >= 70 && event.time <= 160) {
+            event.weight *= 0.25;
+        }
+    }
+    for (const auto& event : excursion[2]) {
+        if (event.time >= 70 && event.time <= 160) {
+            events[2].push_back(event);
+        }
+    }
+    std::sort(events[2].begin(), events[2].end(), [](const auto& a, const auto& b) {
+        return a.time < b.time;
+    });
+    const auto clock = mixxx::recoverBeatClock(events, kBpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_TRUE(clock->constant);
+    EXPECT_NEAR(clock->bpm, kBpm, 0.04);
+}
 // End of autonomously generated text.

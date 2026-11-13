@@ -316,4 +316,50 @@ TEST(BreakbeatGridEvidenceTest, SteadyHalfTempoDoesNotAutomaticallyLoseToDoubleT
     EXPECT_FALSE(slower.unstableDensity);
     EXPECT_FALSE(mixxx::BeatGridEvidence::preferConstant(faster, slower, true));
 }
+
+TEST(BreakbeatGridEvidenceTest, FourOnTheFloorKicksCorrectHalfBeatPhaseDespiteLoudOffbeatHats) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    constexpr double halfPeriod = period * 0.5;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double hatElapsed = std::fmod(time - kOrigin, period);
+                if (hatElapsed < 0.08) {
+                    value += 0.55 * std::exp(-120 * hatElapsed) *
+                            (0.6 * std::cos(2 * M_PI * 1800 * hatElapsed) +
+                                    0.4 * std::cos(2 * M_PI * 2900 * hatElapsed));
+                }
+                if (time >= kOrigin + halfPeriod) {
+                    const double kickElapsed = std::fmod(time - (kOrigin + halfPeriod), period);
+                    if (kickElapsed < 0.14) {
+                        value += 0.85 * std::exp(-38 * kickElapsed) *
+                                (0.85 * std::cos(2 * M_PI * 58 * kickElapsed) +
+                                        0.15 * std::cos(2 * M_PI * 140 * kickElapsed));
+                    }
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto result = evidence.evaluate(constantGrid(), true);
+    ASSERT_TRUE(result.reliable);
+    ASSERT_TRUE(result.grid);
+    EXPECT_FALSE(result.phaseChanges);
+    EXPECT_TRUE(result.grid->hasConstantTempo());
+    for (const double beat : {40.0, 160.0, 320.0}) {
+        const auto expected = mixxx::audio::FramePos(
+                (kOrigin + halfPeriod + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                result.grid->findClosestBeat(expected).value(),
+                0.02 * kSampleRate);
+    }
+}
 // End of autonomously generated text.

@@ -11,11 +11,11 @@ commit `0fffd3d0d07b755c34c1730f7b87afadd8f2be19`.
 | --- | --- | --- |
 | Tempo modes | `BeatGridMode`, `BeatDetectionSettings`, preferences and reanalysis menu | Auto, Constant and Variable modes, including per-track choices and migration of existing settings. |
 | Grid selection | `BeatFactory::makePreferredBeats()` | Separates sustained drift from abrupt tracker phase changes; Constant fits a full-track grid. |
-| Audio clock | `recoverBeatClock()`, `BeatGridEvidence::recoverGrid()` | Selects a supported tempo family across the track and reconstructs shared drift from independent frequency bands. Applies to all three modes. |
-| Kick alignment | `evaluate()`, `findAttack()`, `refineAttackShift()` | Confirms half-beat corrections across both track halves; aligns fine timing to kick attacks while protecting against offbeat kicks and earlier hi-hats. |
+| Audio clock | `recoverBeatClock()`, `BeatGridEvidence::recoverGrid()` | Selects a supported tempo family across the track (with upper-tempo ceiling protection and sub-normal double-tempo recovery), estimates local window tempo warp, and reconstructs shared drift from independent frequency bands. Applies to all three modes. |
+| Kick alignment | `evaluate()`, `findAttack()`, `refineAttackShift()` | Confirms half-beat corrections across both track halves (including dense four-on-the-floor kick/percussion evidence under loud offbeat hats); aligns fine timing to kick attacks up to 55 ms before the low-bass crest while protecting against sparse offbeat kicks and earlier hi-hats. |
 | Queen Mary refinement | `refineBeatTrackingTempo()` | Supplies the initial beat sequence and corrects supported metrical errors before audio-clock recovery. |
 | BPM display and editing | `getBpmInRange()`, `tryScale()`, `tryTranslateBeats()`, `trySetBpm()` | Steadier BPM readings; fractional factors, phase shifts and BPM edits preserve variable tempo. Locked grids remain protected. |
-| Analysis and caching | `AnalyzerBeats` | Preserves protected grids, handles partial final blocks, and versions analysis results. Fast analysis applies to Constant mode. |
+| Analysis and caching | `AnalyzerBeats` | Preserves protected grids, handles partial final blocks, and versions analysis results (`audio_grid_evidence=6`). Fast analysis applies to Constant mode. |
 | Waveform transport | `VisualPlayPosition::getPlaySlipAtNextVSync()` | Searches the complete position history at higher output latency. A bounded fallback keeps the waveform moving while the history fills. |
 | Linux installation | `install-linux.sh`, `tools/install-linux.py` | User-local build/install workflow, dedicated profile and starter, safe updates and RAM-aware parallelism. |
 
@@ -28,8 +28,9 @@ commit `0fffd3d0d07b755c34c1730f7b87afadd8f2be19`.
 | Attack correction (`9aaf9881e9`) | Ubuntu 24.04 container | 1,340 |
 | Audio-clock recovery and variable-grid editing | Ubuntu 24.04 container | 1,376 |
 | Waveform transport fix | Ubuntu 24.04 container | 1,387 |
+| Local tempo-warp recovery, half-beat phase & harmonic refinement | Debian 12 container | 1,391 |
 
-Application and test builds succeeded. The latest total combines 1,386 CTest
+Application and test builds succeeded. The latest total combines 1,390 CTest
 cases and one file test run from a writable directory. The 38 repository-disabled
 tests remain disabled; the optional external-material test adds one more disabled
 entry and was run separately. Use CTest's separate processes to avoid existing
@@ -47,10 +48,13 @@ Coverage includes:
 - **Attack regressions:** aligned/early/late grids, weak spikes before loud bass
   bodies, preceding hi-hats with sustained bass, 44.1/48 kHz, two chunk sizes and
   complete Auto/Constant analysis. Timing tolerance: 3 ms per tested beat.
-- **36 new regressions:** 17 audio-clock cases, four recovery/phase pipeline
-  cases, four clock-fit cases and 11 variable-grid editing/serialization cases.
-  Cover sparse offbeat kicks, missing pulses, silence, independent band offsets,
-  small coherent drift, fractional factors and BPM locks.
+- **40 clock & evidence regressions:** 20 audio-clock cases, five recovery/phase
+  pipeline cases, four clock-fit cases and 11 variable-grid editing/serialization
+  cases. Cover sparse offbeat kicks, four-on-the-floor half-beat recovery under
+  loud offbeat hats, late-track tempo acceleration exceeding half a period per hop,
+  steady-bass rejection of uncorroborated mid-band excursions, harmonic ceiling
+  protection, missing pulses, silence, independent band offsets, small coherent
+  drift, fractional factors and BPM locks.
 - **11 waveform regressions:** delayed audio output, short history, seek,
   pause/play, reverse, slip, loops and invalidation. Two renderer cases reproduce
   the frozen-at-start display before the fix and pass afterward, including beat
