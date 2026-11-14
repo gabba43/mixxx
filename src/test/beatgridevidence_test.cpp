@@ -362,4 +362,95 @@ TEST(BreakbeatGridEvidenceTest, FourOnTheFloorKicksCorrectHalfBeatPhaseDespiteLo
                 0.02 * kSampleRate);
     }
 }
+
+TEST(BreakbeatGridEvidenceTest, DisplacedBodyPhaseIsRetainedWhenUnshiftedGridSitsOnPrecedingHat) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    constexpr double kickOffset = 0.052;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double hatElapsed = std::fmod(time - kOrigin, period);
+                if (hatElapsed < 0.025) {
+                    value += 0.45 * std::exp(-160 * hatElapsed) *
+                            std::cos(2 * M_PI * 3200 * hatElapsed);
+                }
+                if (time >= kOrigin + kickOffset) {
+                    const double kickElapsed =
+                            std::fmod(time - (kOrigin + kickOffset), period);
+                    if (kickElapsed < 0.12) {
+                        value += 0.90 * std::exp(-35 * kickElapsed) *
+                                (0.85 * std::cos(2 * M_PI * 58 * kickElapsed) +
+                                        0.15 * std::cos(2 * M_PI * 160 * kickElapsed));
+                    }
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto result = evidence.evaluate(constantGrid(), true);
+    ASSERT_TRUE(result.reliable);
+    ASSERT_TRUE(result.grid);
+    for (const double beat : {40.0, 160.0, 320.0}) {
+        const auto expected = mixxx::audio::FramePos(
+                (kOrigin + kickOffset + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                result.grid->findClosestBeat(expected).value(),
+                0.025 * kSampleRate);
+    }
+}
+
+TEST(BreakbeatGridEvidenceTest, SidechainedKickTransientPhaseIsRetainedOverDelayedBassRebound) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    constexpr double reboundOffset = 0.045;
+    constexpr double subReleaseOffset = 0.080;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double elapsed = std::fmod(time - kOrigin, period);
+                if (elapsed < 0.030) {
+                    value += 1.40 * std::exp(-35 * elapsed) *
+                            (0.60 * std::cos(2 * M_PI * 2100 * elapsed) +
+                                    0.40 * std::cos(2 * M_PI * 3100 * elapsed));
+                }
+                if (elapsed >= reboundOffset && elapsed < reboundOffset + 0.075) {
+                    const double midElapsed = elapsed - reboundOffset;
+                    value += 0.60 * std::exp(-40 * midElapsed) *
+                            (0.55 * std::cos(2 * M_PI * 165 * midElapsed) +
+                                    0.45 * std::cos(2 * M_PI * 255 * midElapsed));
+                }
+                if (elapsed >= subReleaseOffset && elapsed < subReleaseOffset + 0.090) {
+                    const double subElapsed = elapsed - subReleaseOffset;
+                    value += 0.55 * std::exp(-38 * subElapsed) *
+                            std::cos(2 * M_PI * 52 * subElapsed);
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto grid = evidence.recoverGrid(constantGrid(), mixxx::BeatGridMode::Auto);
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    for (const double beat : {40.0, 160.0, 320.0}) {
+        const auto expected = mixxx::audio::FramePos((kOrigin + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                grid->findClosestBeat(expected).value(),
+                0.02 * kSampleRate);
+    }
+}
 // End of autonomously generated text.

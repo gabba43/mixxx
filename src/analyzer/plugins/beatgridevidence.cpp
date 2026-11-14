@@ -393,11 +393,14 @@ double BeatGridEvidence::refineAttackShift(const std::vector<double>& beats,
         double end,
         double radius) const {
     const double middle = (start + end) * 0.5;
+    const double originalBody = utility(measure(beats, unchanged, start, end));
+    const double proposedBody = utility(measure(beats, proposed, start, end));
+    const bool bodyDisplaced = originalBody < 0.15 && proposedBody > originalBody + 0.25;
     const double original = utility(measure(beats, unchanged, start, end, true));
     const auto firstOriginal = measure(beats, unchanged, start, middle, true);
     const auto secondOriginal = measure(beats, unchanged, middle, end, true);
     double best = std::max(0.2, original + 0.005);
-    double shift = unchanged;
+    double shift = bodyDisplaced ? proposed : unchanged;
     const auto steps = static_cast<int>(std::lround(radius / 0.001));
     for (int step = -steps; step <= steps; ++step) {
         const double candidate = proposed + step * 0.001;
@@ -407,11 +410,13 @@ double BeatGridEvidence::refineAttackShift(const std::vector<double>& beats,
         }
         const auto first = measure(beats, candidate, start, middle, true);
         const auto second = measure(beats, candidate, middle, end, true);
-        const auto supports = [&](size_t band) {
-            return first[band][0].f1 > std::max(0.2, firstOriginal[band][0].f1 + 0.002) &&
-                    second[band][0].f1 > std::max(0.2, secondOriginal[band][0].f1 + 0.002);
+        const auto supports = [&](size_t band, size_t scale) {
+            return first[band][scale].f1 >
+                    std::max(0.2, firstOriginal[band][scale].f1 + 0.002) &&
+                    second[band][scale].f1 >
+                    std::max(0.2, secondOriginal[band][scale].f1 + 0.002);
         };
-        if (!supports(0) || !supports(2)) {
+        if (!supports(0, 0) || !(supports(2, 0) || (bodyDisplaced && supports(2, 1)))) {
             continue;
         }
         best = score;
@@ -445,7 +450,48 @@ BeatsPointer BeatGridEvidence::recoverGrid(const BeatsPointer& reference, BeatGr
         if (std::abs(delta) > halfPeriod * 0.5) {
             grid = grid->tryTranslate(std::copysign(halfPeriod, delta)).value_or(grid);
         }
-        return evaluate(grid, mode == BeatGridMode::Auto).grid;
+        const auto evaluated = evaluate(grid, mode == BeatGridMode::Auto);
+        grid = evaluated.grid;
+        if (grid && clock->harmonicRatio == 1 && !evaluated.phaseChanges) {
+            const auto midAnchor = reference->findClosestBeat(audio::FramePos(m_frames * 0.5));
+            const double refDelta =
+                    (midAnchor - grid->findClosestBeat(midAnchor)) / m_sampleRate.value();
+            if (refDelta >= -0.095 && refDelta <= -0.030) {
+                std::vector<double> beats;
+                for (auto it = grid->iteratorFrom(audio::kStartFramePos);
+                        (*it).value() < m_frames;
+                        ++it) {
+                    const double time = (*it).value() / m_sampleRate;
+                    if (time >= 0) {
+                        beats.push_back(time);
+                    }
+                    if (beats.size() > 1000000) {
+                        break;
+                    }
+                }
+                const double guard = duration > 32 ? 8 : 1;
+                const double middle = duration * 0.5;
+                const auto refScores = measure(beats, refDelta, guard, duration - guard);
+                const auto firstRef = measure(beats, refDelta, guard, middle);
+                const auto secondRef = measure(beats, refDelta, middle, duration - guard);
+                const auto refAttack = measure(beats, refDelta, guard, duration - guard, true);
+                const auto troughScores = measure(beats, refDelta * 0.5, guard, duration - guard);
+                const auto zeroScores = measure(beats, 0, guard, duration - guard);
+                // Heavy sidechain compression can duck the low-bass band right after
+                // a broadband kick transient and release 30-95 ms later. Retain the
+                // transient phase when full-band evidence supports it in both halves
+                // and the intermediate sub-bass trough confirms sidechain ducking.
+                if (refScores[3][1].f1 >= 0.30 && firstRef[3][1].f1 >= 0.25 &&
+                        secondRef[3][1].f1 >= 0.25 && refAttack[3][0].f1 >= 0.14 &&
+                        troughScores[0][1].f1 < 0.12 &&
+                        troughScores[0][1].f1 <
+                                0.6 * std::max(refScores[0][1].f1, zeroScores[0][1].f1) &&
+                        zeroScores[1][1].f1 > troughScores[1][1].f1 + 0.10) {
+                    grid = grid->tryTranslate(refDelta * m_sampleRate).value_or(grid);
+                }
+            }
+        }
+        return grid;
     };
     if (mode == BeatGridMode::Constant || (mode == BeatGridMode::Auto && clock->constant)) {
         const auto grid = Beats::fromConstTempo(m_sampleRate,
@@ -545,7 +591,8 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
         // Keep the original phase when both halves independently contradict
         // a larger bass-led translation; do not replace it with a tiny shift.
         const auto contradicts = [](const Scores& proposed, const Scores& current) {
-            return current[3][1].f1 >= 0.2 && proposed[3][1].f1 < current[3][1].f1 - 0.02;
+            return current[3][1].f1 >= 0.2 && proposed[3][1].f1 < current[3][1].f1 - 0.02 &&
+                    !(utility(current) < 0.15 && utility(proposed) > utility(current) + 0.25);
         };
         retainOriginalPhase = std::abs(safeZeroShift) > 0.010001 &&
                 contradicts(first, firstOriginal) && contradicts(second, secondOriginal);
@@ -643,7 +690,11 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
     const bool denseMidPercussion =
             candidates[1][2][1].precision >= 0.70 * candidates[1][2][1].recall &&
             candidates[1][3][1].precision >= 0.70 * candidates[1][3][1].recall;
-    const bool percussionHalfSupported = percussionSupports(candidates[1], candidates[0], 0.03) &&
+    const bool percussionHalfSupported =
+            (percussionSupports(candidates[1], candidates[0], 0.03) ||
+                    (denseMidPercussion &&
+                            percussionSupports(candidates[1], candidates[0], 0.025) &&
+                            candidates[1][3][1].f1 > candidates[0][3][1].f1 + 0.10)) &&
             candidates[1][3][1].f1 > original[3][1].f1 + 0.03 &&
             (candidates[1][0][1].f1 <= candidates[0][0][1].f1 || denseMidPercussion) &&
             corroborated(firstHalf, firstSame, firstHalfAttack, firstSameAttack) &&
