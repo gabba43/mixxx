@@ -84,6 +84,188 @@ std::optional<double> findAttack(const std::vector<double>& transient,
     return std::nullopt;
 }
 
+double foldedKickShift(const std::vector<double>& wave,
+        const std::vector<double>& fullBandEnergy,
+        const std::vector<double>& beats,
+        double rate,
+        double period,
+        double guard,
+        double duration) {
+    if (beats.size() < 32 || wave.size() != fullBandEnergy.size() || wave.empty() ||
+            rate < 700 || period < 0.2 || period > 1.5 || duration <= 2 * guard) {
+        return 0;
+    }
+    const size_t n = wave.size();
+    std::vector<double> sub = wave;
+    std::vector<double> punch = wave;
+    lowpass(&sub, 85.0, rate);
+    lowpass(&punch, 200.0, rate);
+
+    std::vector<double> mid(n);
+    std::vector<double> trans(n);
+    for (size_t i = 0; i < n; ++i) {
+        const double lp85 = sub[i];
+        const double lp200 = punch[i];
+        sub[i] = std::abs(lp85);
+        punch[i] = std::abs(lp200 - lp85);
+        mid[i] = std::abs(wave[i] - lp200);
+        trans[i] = std::sqrt(std::max(0.0, fullBandEnergy[i] - wave[i] * wave[i]));
+    }
+    lowpass(&sub, 35.0, rate);
+    lowpass(&punch, 45.0, rate);
+    lowpass(&mid, 55.0, rate);
+    lowpass(&trans, 65.0, rate);
+
+    constexpr int kBins = 64;
+    const auto at = [](const std::vector<double>& v, int idx) {
+        return v[(idx % kBins + kBins) % kBins];
+    };
+    const auto meanRange = [&](const std::vector<double>& v, int b, int d0, int d1) {
+        double s = 0;
+        for (int d = d0; d <= d1; ++d) {
+            s += at(v, b + d);
+        }
+        return s / (d1 - d0 + 1);
+    };
+    const auto maxRange = [&](const std::vector<double>& v, int b, int d0, int d1) {
+        double m = -1e9;
+        for (int d = d0; d <= d1; ++d) {
+            m = std::max(m, at(v, b + d));
+        }
+        return m;
+    };
+    const auto minRange = [&](const std::vector<double>& v, int b, int d0, int d1) {
+        double m = 1e9;
+        for (int d = d0; d <= d1; ++d) {
+            m = std::min(m, at(v, b + d));
+        }
+        return m;
+    };
+    const auto computeFolded = [&](double tStart, double tEnd) {
+        std::array<std::vector<double>, 4> folded{
+                std::vector<double>(kBins, 0),
+                std::vector<double>(kBins, 0),
+                std::vector<double>(kBins, 0),
+                std::vector<double>(kBins, 0)};
+        int count = 0;
+        for (size_t k = 0; k + 1 < beats.size(); ++k) {
+            const double b0 = beats[k];
+            const double b1 = beats[k + 1];
+            if (b0 < tStart || b1 > tEnd) {
+                continue;
+            }
+            const double localP = b1 - b0;
+            if (localP < 0.2 || localP > 1.5) {
+                continue;
+            }
+            const size_t iStart = static_cast<size_t>(b0 * rate);
+            const size_t iEnd = std::min(n, static_cast<size_t>(b1 * rate));
+            double maxT = 1e-9, maxM = 1e-9, maxP = 1e-9, maxS = 1e-9;
+            for (size_t i = iStart; i < iEnd; ++i) {
+                maxT = std::max(maxT, trans[i]);
+                maxM = std::max(maxM, mid[i]);
+                maxP = std::max(maxP, punch[i]);
+                maxS = std::max(maxS, sub[i]);
+            }
+            if (maxT < 0.01 && maxS < 0.01) {
+                continue;
+            }
+            ++count;
+            const double binSec = localP / kBins;
+            for (int b = 0; b < kBins; ++b) {
+                const double t0 = b0 + b * binSec;
+                const double t1 = t0 + binSec;
+                const size_t s0 = static_cast<size_t>(t0 * rate);
+                const size_t s1 = std::min(n, std::max(s0 + 1, static_cast<size_t>(t1 * rate)));
+                double ms = 0, mp = 0, mm = 0, mt = 0;
+                for (size_t i = s0; i < s1; ++i) {
+                    ms += sub[i];
+                    mp += punch[i];
+                    mm += mid[i];
+                    mt += trans[i];
+                }
+                const double inv = 1.0 / (s1 - s0);
+                folded[0][b] += (ms * inv) / maxS;
+                folded[1][b] += (mp * inv) / maxP;
+                folded[2][b] += (mm * inv) / maxM;
+                folded[3][b] += (mt * inv) / maxT;
+            }
+        }
+        for (int c = 0; c < 4; ++c) {
+            for (int b = 0; b < kBins; ++b) {
+                folded[c][b] /= std::max(1, count);
+            }
+        }
+        return folded;
+    };
+    const auto scoreFolded = [&](const std::array<std::vector<double>, 4>& folded, int* outBest) {
+        const auto& fs = folded[0];
+        const auto& fp = folded[1];
+        const auto& fm = folded[2];
+        const auto& ft = folded[3];
+        std::vector<double> scores(kBins, 0);
+        int best = 0;
+        for (int b = 0; b < kBins; ++b) {
+            const double transPeak = 0.6 * at(ft, b) + 0.4 * at(ft, b + 1);
+            const double transBefore = meanRange(ft, b, -4, -1);
+            const double transRise = std::max(0.0, transPeak - transBefore);
+            const double transTail = meanRange(ft, b, 3, 8);
+            const double transDrop = std::max(0.0, transPeak - 0.65 * transTail);
+
+            const double midKnock = maxRange(fm, b, 1, 6) - meanRange(fm, b, -4, -1);
+            const double punchKnock = maxRange(fp, b, 1, 6);
+            const double subTrough = minRange(fs, b, 1, 7);
+            const double subRebound = maxRange(fs, b, 7, 22) - subTrough;
+            const double punchRebound = maxRange(fp, b, 5, 20) - minRange(fp, b, 0, 4);
+
+            const double score = transRise * (0.4 + 0.6 * transDrop) *
+                    (0.35 * std::max(0.0, midKnock) + 0.25 * punchKnock +
+                            0.25 * std::max(0.0, subRebound) + 0.15 * std::max(0.0, punchRebound));
+            scores[b] = score;
+            if (score > scores[best]) {
+                best = b;
+            }
+        }
+        *outBest = best;
+        return scores;
+    };
+
+    const double middle = duration * 0.5;
+    const auto fullFolded = computeFolded(guard, duration - guard);
+    const auto firstFolded = computeFolded(guard, middle);
+    const auto secondFolded = computeFolded(middle, duration - guard);
+
+    int bestBin = 0, bestFirst = 0, bestSecond = 0;
+    const auto kickScore = scoreFolded(fullFolded, &bestBin);
+    const auto firstScore = scoreFolded(firstFolded, &bestFirst);
+    const auto secondScore = scoreFolded(secondFolded, &bestSecond);
+
+    const auto& fSub = fullFolded[0];
+    const auto& fTrans = fullFolded[3];
+    const auto binDist = [&](int a, int b) {
+        const int d = std::abs(a - b) % kBins;
+        return std::min(d, kBins - d);
+    };
+
+    const double score0 = maxRange(kickScore, 0, -2, 2);
+    const double ratio = kickScore[bestBin] / std::max(1e-6, score0);
+    const bool halvesAgree =
+            binDist(bestFirst, bestBin) <= 2 &&
+            binDist(bestSecond, bestBin) <= 2 &&
+            maxRange(firstScore, bestBin, -2, 2) > 5.0 * maxRange(firstScore, 0, -2, 2) &&
+            maxRange(secondScore, bestBin, -2, 2) > 5.0 * maxRange(secondScore, 0, -2, 2);
+    if (binDist(bestBin, 0) <= 2 || kickScore[bestBin] < 0.10 || ratio < 15.0 ||
+            fTrans[bestBin] < 0.70 || fTrans[bestBin] < fTrans[0] + 0.20 ||
+            fSub[bestBin] < 0.30 || !halvesAgree) {
+        return 0;
+    }
+    double shift = bestBin * (period / kBins);
+    if (shift > period * 0.5) {
+        shift -= period;
+    }
+    return shift;
+}
+
 } // namespace
 
 void BeatGridEvidence::initialize(audio::SampleRate sampleRate) {
@@ -452,42 +634,50 @@ BeatsPointer BeatGridEvidence::recoverGrid(const BeatsPointer& reference, BeatGr
         }
         const auto evaluated = evaluate(grid, mode == BeatGridMode::Auto);
         grid = evaluated.grid;
-        if (grid && clock->harmonicRatio == 1 && !evaluated.phaseChanges) {
-            const auto midAnchor = reference->findClosestBeat(audio::FramePos(m_frames * 0.5));
-            const double refDelta =
-                    (midAnchor - grid->findClosestBeat(midAnchor)) / m_sampleRate.value();
-            if (refDelta >= -0.095 && refDelta <= -0.030) {
-                std::vector<double> beats;
-                for (auto it = grid->iteratorFrom(audio::kStartFramePos);
-                        (*it).value() < m_frames;
-                        ++it) {
-                    const double time = (*it).value() / m_sampleRate;
-                    if (time >= 0) {
-                        beats.push_back(time);
-                    }
-                    if (beats.size() > 1000000) {
-                        break;
-                    }
+        if (grid && !evaluated.phaseChanges) {
+            std::vector<double> beats;
+            for (auto it = grid->iteratorFrom(audio::kStartFramePos);
+                    (*it).value() < m_frames;
+                    ++it) {
+                const double time = (*it).value() / m_sampleRate;
+                if (time >= 0) {
+                    beats.push_back(time);
                 }
-                const double guard = duration > 32 ? 8 : 1;
-                const double middle = duration * 0.5;
-                const auto refScores = measure(beats, refDelta, guard, duration - guard);
-                const auto firstRef = measure(beats, refDelta, guard, middle);
-                const auto secondRef = measure(beats, refDelta, middle, duration - guard);
-                const auto refAttack = measure(beats, refDelta, guard, duration - guard, true);
-                const auto troughScores = measure(beats, refDelta * 0.5, guard, duration - guard);
-                const auto zeroScores = measure(beats, 0, guard, duration - guard);
-                // Heavy sidechain compression can duck the low-bass band right after
-                // a broadband kick transient and release 30-95 ms later. Retain the
-                // transient phase when full-band evidence supports it in both halves
-                // and the intermediate sub-bass trough confirms sidechain ducking.
-                if (refScores[3][1].f1 >= 0.30 && firstRef[3][1].f1 >= 0.25 &&
-                        secondRef[3][1].f1 >= 0.25 && refAttack[3][0].f1 >= 0.14 &&
-                        troughScores[0][1].f1 < 0.12 &&
-                        troughScores[0][1].f1 <
-                                0.6 * std::max(refScores[0][1].f1, zeroScores[0][1].f1) &&
-                        zeroScores[1][1].f1 > troughScores[1][1].f1 + 0.10) {
-                    grid = grid->tryTranslate(refDelta * m_sampleRate).value_or(grid);
+                if (beats.size() > 1000000) {
+                    break;
+                }
+            }
+            const double guard = duration > 32 ? 8 : 1;
+            const double rate = m_hop > 0 ? static_cast<double>(m_sampleRate.value()) / m_hop : 0;
+            const double foldedShift = foldedKickShift(
+                    m_wave, m_fullBandEnergy, beats, rate, 60 / clock->bpm, guard, duration);
+            if (foldedShift != 0) {
+                grid = grid->tryTranslate(foldedShift * m_sampleRate).value_or(grid);
+            } else if (clock->harmonicRatio == 1) {
+                const auto midAnchor = reference->findClosestBeat(audio::FramePos(m_frames * 0.5));
+                const double refDelta =
+                        (midAnchor - grid->findClosestBeat(midAnchor)) / m_sampleRate.value();
+                if (refDelta >= -0.095 && refDelta <= -0.030) {
+                    const double middle = duration * 0.5;
+                    const auto refScores = measure(beats, refDelta, guard, duration - guard);
+                    const auto firstRef = measure(beats, refDelta, guard, middle);
+                    const auto secondRef = measure(beats, refDelta, middle, duration - guard);
+                    const auto refAttack = measure(beats, refDelta, guard, duration - guard, true);
+                    const auto troughScores =
+                            measure(beats, refDelta * 0.5, guard, duration - guard);
+                    const auto zeroScores = measure(beats, 0, guard, duration - guard);
+                    // Heavy sidechain compression can duck the low-bass band right after
+                    // a broadband kick transient and release 30-95 ms later. Retain the
+                    // transient phase when full-band evidence supports it in both halves
+                    // and the intermediate sub-bass trough confirms sidechain ducking.
+                    if (refScores[3][1].f1 >= 0.30 && firstRef[3][1].f1 >= 0.25 &&
+                            secondRef[3][1].f1 >= 0.25 && refAttack[3][0].f1 >= 0.14 &&
+                            troughScores[0][1].f1 < 0.12 &&
+                            troughScores[0][1].f1 <
+                                    0.6 * std::max(refScores[0][1].f1, zeroScores[0][1].f1) &&
+                            zeroScores[1][1].f1 > troughScores[1][1].f1 + 0.10) {
+                        grid = grid->tryTranslate(refDelta * m_sampleRate).value_or(grid);
+                    }
                 }
             }
         }

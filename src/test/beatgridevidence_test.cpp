@@ -453,4 +453,51 @@ TEST(BreakbeatGridEvidenceTest, SidechainedKickTransientPhaseIsRetainedOverDelay
                 0.02 * kSampleRate);
     }
 }
+
+TEST(BreakbeatGridEvidenceTest, FoldedKickEnvelopeAlignsToKickOverDisplacedSidechainRumble) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    constexpr double rumbleOffset = 0.045;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double elapsed = std::fmod(time - kOrigin, period);
+                if (elapsed < 0.024) {
+                    value += 1.10 * std::exp(-65 * elapsed) *
+                            (0.45 * std::cos(2 * M_PI * 2400 * elapsed) +
+                                    0.30 * std::cos(2 * M_PI * 260 * elapsed) +
+                                    0.55 * std::cos(2 * M_PI * 62 * elapsed));
+                }
+                if (elapsed >= rumbleOffset && elapsed < rumbleOffset + 0.110) {
+                    const double rumbleElapsed = elapsed - rumbleOffset;
+                    const double env = std::sin(M_PI * rumbleElapsed / 0.110);
+                    value += 1.15 * env *
+                            (0.75 * std::cos(2 * M_PI * 54 * rumbleElapsed) +
+                                    0.25 * std::cos(2 * M_PI * 95 * rumbleElapsed));
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto displacedReference = mixxx::Beats::fromConstTempo(
+            kRate,
+            mixxx::audio::FramePos((kOrigin + 0.080) * kSampleRate),
+            mixxx::Bpm(kBpm));
+    const auto grid = evidence.recoverGrid(displacedReference, mixxx::BeatGridMode::Auto);
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    for (const double beat : {40.0, 160.0, 320.0}) {
+        const auto expected = mixxx::audio::FramePos((kOrigin + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                grid->findClosestBeat(expected).value(),
+                0.02 * kSampleRate);
+    }
+}
 // End of autonomously generated text.

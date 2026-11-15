@@ -560,23 +560,29 @@ std::optional<ConsensusClock> correlateClocks(const std::vector<Window>& windows
     double covariance = 0;
     double firstVariance = 0;
     double secondVariance = 0;
-    const double slope = (firstSlope + secondSlope) / 2;
+    const double firstNoise = weightedQuantile(first.errors, weights, 0.75);
+    const double secondNoise = weightedQuantile(second.errors, weights, 0.75);
+    const double firstThreshold = std::max(0.012, 3 * firstNoise);
+    const bool firstSteady = first.span <= firstThreshold && second.span > 2.5 * first.span;
+    const double slope = firstSteady ? first.slope : (firstSlope + secondSlope) / 2;
     for (size_t i = 0; i < windows.size(); ++i) {
-        const double firstResidual =
-                firstPhase[i] - firstIntercept - firstSlope * windows[i].center;
+        const double firstResidual = firstSteady
+                ? (first.phase[i] - first.intercept - first.slope * windows[i].center)
+                : (firstPhase[i] - firstIntercept - firstSlope * windows[i].center);
         const double secondResidual =
                 second.phase[i] - secondIntercept - secondSlope * windows[i].center;
-        const double residual = (firstResidual + secondResidual) / 2;
+        const double residual = firstSteady ? firstResidual : (firstResidual + secondResidual) / 2;
         covariance += weights[i] * firstResidual * secondResidual;
         firstVariance += weights[i] * firstResidual * firstResidual;
         secondVariance += weights[i] * secondResidual * secondResidual;
         residuals.push_back(residual);
         phase.push_back(baseIntercept + slope * windows[i].center + residual);
     }
-    const double span = weightedQuantile(residuals, weights, 0.95) -
-            weightedQuantile(residuals, weights, 0.05);
-    const double noise = std::max(weightedQuantile(first.errors, weights, 0.75),
-            weightedQuantile(second.errors, weights, 0.75));
+    const double span = firstSteady
+            ? first.span
+            : (weightedQuantile(residuals, weights, 0.95) -
+                      weightedQuantile(residuals, weights, 0.05));
+    const double noise = firstSteady ? firstNoise : std::max(firstNoise, secondNoise);
     const double correlation =
             covariance / std::sqrt(std::max(1e-24, firstVariance * secondVariance));
     return ConsensusClock{phase,
@@ -597,6 +603,9 @@ std::optional<ConsensusClock> recoverConsensus(const std::vector<Window>& window
     for (size_t band = 0; band < clocks.size(); ++band) {
         clocks[band] = recoverBand(windows, histogram, band, period, duration, warpFactors);
     }
+    const auto consensus01 = (clocks[0] && clocks[1])
+            ? correlateClocks(windows, *clocks[0], *clocks[1], period, duration)
+            : std::nullopt;
     if (clocks[2]) {
         auto consensus12 = clocks[1]
                 ? correlateClocks(windows, *clocks[1], *clocks[2], period, duration)
@@ -604,10 +613,17 @@ std::optional<ConsensusClock> recoverConsensus(const std::vector<Window>& window
         auto consensus02 = clocks[0]
                 ? correlateClocks(windows, *clocks[0], *clocks[2], period, duration)
                 : std::nullopt;
-        if (consensus12 && consensus02 && clocks[0]->span <= 0.018 &&
-                consensus12->span > consensus12->threshold &&
-                consensus02->correlation <= 0.6) {
-            return consensus02;
+        if (consensus12 && consensus12->span > consensus12->threshold) {
+            if (consensus02 &&
+                    ((clocks[0]->span <= 0.018 && consensus02->correlation <= 0.6) ||
+                            (consensus02->span <= consensus02->threshold &&
+                                    consensus02->span < 0.5 * consensus12->span))) {
+                return consensus02;
+            }
+            if (consensus01 && consensus01->span <= consensus01->threshold &&
+                    consensus01->span < 0.5 * consensus12->span) {
+                return consensus01;
+            }
         }
         if (consensus12) {
             return consensus12;
@@ -615,10 +631,8 @@ std::optional<ConsensusClock> recoverConsensus(const std::vector<Window>& window
         if (consensus02) {
             return consensus02;
         }
-    } else if (clocks[0] && clocks[1]) {
-        return correlateClocks(windows, *clocks[0], *clocks[1], period, duration);
     }
-    return std::nullopt;
+    return consensus01;
 }
 
 } // namespace
@@ -704,9 +718,13 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
             ? recoverConsensus(
                       prepareWindows(*attacks, duration), histogram, period, duration, warpFactors)
             : std::nullopt;
-    if (!consensus || (consensus->span > consensus->threshold && consensus->correlation <= 0.6)) {
+    if (!consensus || consensus->span > consensus->threshold) {
         auto bodyConsensus = recoverConsensus(windows, histogram, period, duration, warpFactors);
-        if (!consensus || (bodyConsensus && bodyConsensus->correlation > 0.8)) {
+        if (!consensus ||
+                (consensus->correlation <= 0.6 && bodyConsensus &&
+                        bodyConsensus->correlation > 0.8) ||
+                (bodyConsensus && bodyConsensus->span <= bodyConsensus->threshold &&
+                        bodyConsensus->span < 0.5 * consensus->span)) {
             consensus = bodyConsensus;
         }
     }

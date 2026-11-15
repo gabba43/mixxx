@@ -324,7 +324,7 @@ QHash<QString, QString> AnalyzerBeats::getExtraVersionInfo(
         extraVersionInfo["tempo_mode"] = "auto:3";
     }
     if (pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
-        extraVersionInfo["audio_grid_evidence"] = "6";
+        extraVersionInfo["audio_grid_evidence"] = "7";
     }
     if (pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
         extraVersionInfo["beat_tracker_version"] = "3";

@@ -416,4 +416,29 @@ TEST(BeatClockRecoveryTest, SteadyBassClockRejectsUncorroboratedMidPercussionExc
     EXPECT_TRUE(clock->constant);
     EXPECT_NEAR(clock->bpm, kBpm, 0.04);
 }
+
+TEST(BeatClockRecoveryTest, SteadyLowBandRejectsUpperBandArrangementStep) {
+    auto events = makeEvents();
+    const auto shifted = makeEvents([](double time) {
+        return time >= 120 ? 0.060 : 0.0;
+    });
+    events[2] = shifted[2];
+    events[3] = shifted[3];
+    const auto clock = mixxx::recoverBeatClock(events, kBpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_TRUE(clock->constant);
+    EXPECT_NEAR(clock->bpm, kBpm, 0.02);
+}
+
+TEST(BeatClockRecoveryTest, SteadyLowerBandPairRejectsFullBandArrangementExcursion) {
+    auto events = makeEvents();
+    const auto shifted = makeEvents([](double time) {
+        return time >= 110 && time <= 190 ? 0.095 : 0.0;
+    });
+    events[3] = shifted[3];
+    const auto clock = mixxx::recoverBeatClock(events, kBpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_TRUE(clock->constant);
+    EXPECT_NEAR(clock->bpm, kBpm, 0.02);
+}
 // End of autonomously generated text.
