@@ -781,8 +781,7 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
         // Keep the original phase when both halves independently contradict
         // a larger bass-led translation; do not replace it with a tiny shift.
         const auto contradicts = [](const Scores& proposed, const Scores& current) {
-            return current[3][1].f1 >= 0.2 && proposed[3][1].f1 < current[3][1].f1 - 0.02 &&
-                    !(utility(current) < 0.15 && utility(proposed) > utility(current) + 0.25);
+            return current[3][1].f1 >= 0.2 && proposed[3][1].f1 < current[3][1].f1 - 0.02;
         };
         retainOriginalPhase = std::abs(safeZeroShift) > 0.010001 &&
                 contradicts(first, firstOriginal) && contradicts(second, secondOriginal);
