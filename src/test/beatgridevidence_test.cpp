@@ -547,4 +547,154 @@ TEST(BreakbeatGridEvidenceTest, FullBandAttackContradictionRetainsPhaseAgainstDe
                 0.015 * kSampleRate);
     }
 }
+
+TEST(BreakbeatGridEvidenceTest, OffbeatSubRumbleDoesNotFlipAlignedKickPhase) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const int beatIndex = static_cast<int>((time - kOrigin) / period);
+                const double elapsed = (time - kOrigin) - beatIndex * period;
+                // Crisp four-on-the-floor kick knock, punch, and click on the beat.
+                if (elapsed < 0.050) {
+                    value += 0.95 * std::exp(-48 * elapsed) *
+                            (0.45 * std::cos(2 * M_PI * 260 * elapsed) +
+                                    0.40 * std::cos(2 * M_PI * 130 * elapsed) +
+                                    0.35 * std::cos(2 * M_PI * 1800 * elapsed));
+                }
+                // Intermittent booming offbeat sub-bass rumble near the half-beat
+                // (low beat coverage, strong low-pass peak).
+                if (beatIndex % 3 != 0) {
+                    const double subElapsed = elapsed - period * 0.48;
+                    if (subElapsed >= 0 && subElapsed < 0.130) {
+                        const double env = std::sin(M_PI * subElapsed / 0.130);
+                        value += 0.85 * env * std::cos(2 * M_PI * 52 * subElapsed);
+                    }
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto evaluated = evidence.evaluate(constantGrid(), true);
+    ASSERT_TRUE(evaluated.reliable);
+    ASSERT_TRUE(evaluated.grid);
+    EXPECT_FALSE(evaluated.phaseChanges);
+    for (const double beat : {40.0, 160.0, 320.0}) {
+        const auto expected = mixxx::audio::FramePos((kOrigin + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                evaluated.grid->findClosestBeat(expected).value(),
+                0.025 * kSampleRate);
+    }
+}
+
+TEST(BreakbeatGridEvidenceTest, QuietNoKickOutroDoesNotInsertRegionalPhaseJump) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    constexpr int longDuration = 280;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * longDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * longDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin && time < 216.0) {
+                const double elapsed = std::fmod(time - kOrigin, period);
+                // Active four-on-the-floor kick groove.
+                if (elapsed < 0.080) {
+                    value += 1.00 * std::exp(-32 * elapsed) *
+                            (0.55 * std::cos(2 * M_PI * 62 * elapsed) +
+                                    0.30 * std::cos(2 * M_PI * 165 * elapsed) +
+                                    0.25 * std::cos(2 * M_PI * 2400 * elapsed));
+                }
+            } else if (time >= 216.0) {
+                // Quiet no-kick outro with a half-beat-shifted synth/bass pulse
+                // (~45% of active low-band amplitude).
+                const double elapsed = std::fmod(time - kOrigin + period * 0.5, period);
+                if (elapsed < 0.070) {
+                    value += 0.42 * std::exp(-35 * elapsed) *
+                            (0.50 * std::cos(2 * M_PI * 75 * elapsed) +
+                                    0.30 * std::cos(2 * M_PI * 230 * elapsed) +
+                                    0.25 * std::cos(2 * M_PI * 1600 * elapsed));
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto evaluated = evidence.evaluate(constantGrid(), true);
+    ASSERT_TRUE(evaluated.reliable);
+    ASSERT_TRUE(evaluated.grid);
+    EXPECT_FALSE(evaluated.phaseChanges);
+    for (const double beat : {40.0, 200.0, 400.0}) {
+        const auto expected = mixxx::audio::FramePos((kOrigin + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                evaluated.grid->findClosestBeat(expected).value(),
+                0.020 * kSampleRate);
+    }
+}
+
+TEST(BreakbeatGridEvidenceTest, FoldedKickImpulseAlignsQuarterBeatKickWithBreakdowns) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double period = 60 / kBpm;
+    constexpr double kickShift = period * 0.25;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                // Include a quiet no-kick breakdown in the second half.
+                const bool breakdown = time >= 145.0 && time < 175.0;
+                const double elapsed = std::fmod(time - (kOrigin + kickShift) + period, period);
+                if (!breakdown) {
+                    // Causal downward kick sweep: mid knock -> low-mid punch -> sub body.
+                    if (elapsed < 0.025) {
+                        value += 0.90 * std::exp(-75 * elapsed) *
+                                (0.65 * std::cos(2 * M_PI * 290 * elapsed) +
+                                        0.35 * std::cos(2 * M_PI * 1900 * elapsed));
+                    }
+                    if (elapsed >= 0.010 && elapsed < 0.055) {
+                        const double p = elapsed - 0.010;
+                        value += 0.95 * std::exp(-45 * p) * std::cos(2 * M_PI * 135 * p);
+                    }
+                    if (elapsed >= 0.024 && elapsed < 0.110) {
+                        const double s = elapsed - 0.024;
+                        value += 0.85 * std::exp(-28 * s) * std::cos(2 * M_PI * 56 * s);
+                    }
+                }
+                // High-frequency percussion stab on the displaced reference phase.
+                const double refElapsed = std::fmod(time - kOrigin, period);
+                if (refElapsed < 0.018) {
+                    value += 0.55 * std::exp(-110 * refElapsed) *
+                            std::cos(2 * M_PI * 2800 * refElapsed);
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto grid = evidence.recoverGrid(constantGrid(), mixxx::BeatGridMode::Auto);
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    for (const double beat : {40.0, 160.0, 320.0}) {
+        const auto expected =
+                mixxx::audio::FramePos((kOrigin + kickShift + beat * period) * kSampleRate);
+        EXPECT_NEAR(expected.value(),
+                grid->findClosestBeat(expected).value(),
+                0.025 * kSampleRate);
+    }
+}
 // End of autonomously generated text.

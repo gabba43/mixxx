@@ -141,39 +141,81 @@ double foldedKickShift(const std::vector<double>& wave,
         }
         return m;
     };
-    const auto computeFolded = [&](double tStart, double tEnd) {
+    struct BeatStats {
+        size_t index = 0;
+        double start = 0;
+        double localP = 0;
+        double maxS = 1e-9;
+        double maxP = 1e-9;
+        double maxM = 1e-9;
+        double maxT = 1e-9;
+    };
+    std::vector<BeatStats> validBeats;
+    validBeats.reserve(beats.size());
+    std::vector<double> beatMaxM;
+    std::vector<double> beatMaxP;
+    beatMaxM.reserve(beats.size());
+    beatMaxP.reserve(beats.size());
+    for (size_t k = 0; k + 1 < beats.size(); ++k) {
+        const double b0 = beats[k];
+        const double b1 = beats[k + 1];
+        if (b0 < guard || b1 > duration - guard) {
+            continue;
+        }
+        const double localP = b1 - b0;
+        if (localP < 0.2 || localP > 1.5) {
+            continue;
+        }
+        const size_t iStart = static_cast<size_t>(b0 * rate);
+        const size_t iEnd = std::min(n, static_cast<size_t>(b1 * rate));
+        double maxT = 1e-9, maxM = 1e-9, maxP = 1e-9, maxS = 1e-9;
+        for (size_t i = iStart; i < iEnd; ++i) {
+            maxT = std::max(maxT, trans[i]);
+            maxM = std::max(maxM, mid[i]);
+            maxP = std::max(maxP, punch[i]);
+            maxS = std::max(maxS, sub[i]);
+        }
+        if (maxT < 0.01 && maxS < 0.01) {
+            continue;
+        }
+        validBeats.push_back({k, b0, localP, maxS, maxP, maxM, maxT});
+        beatMaxM.push_back(maxM);
+        beatMaxP.push_back(maxP);
+    }
+    const double p80M = std::max(1e-6, quantile(beatMaxM, 0.8));
+    const double p80P = std::max(1e-6, quantile(beatMaxP, 0.8));
+
+    const auto computeFolded = [&](double tStart,
+                                       double tEnd,
+                                       int parityFilter,
+                                       bool energyWeighted,
+                                       double* outWeightSum = nullptr) {
         std::array<std::vector<double>, 4> folded{
                 std::vector<double>(kBins, 0),
                 std::vector<double>(kBins, 0),
                 std::vector<double>(kBins, 0),
                 std::vector<double>(kBins, 0)};
-        int count = 0;
-        for (size_t k = 0; k + 1 < beats.size(); ++k) {
-            const double b0 = beats[k];
-            const double b1 = beats[k + 1];
-            if (b0 < tStart || b1 > tEnd) {
+        double weightSum = 0;
+        for (const auto& beat : validBeats) {
+            if (parityFilter >= 0 && static_cast<int>(beat.index % 2) != parityFilter) {
                 continue;
             }
-            const double localP = b1 - b0;
-            if (localP < 0.2 || localP > 1.5) {
+            if (beat.start < tStart || beat.start + beat.localP > tEnd) {
                 continue;
             }
-            const size_t iStart = static_cast<size_t>(b0 * rate);
-            const size_t iEnd = std::min(n, static_cast<size_t>(b1 * rate));
-            double maxT = 1e-9, maxM = 1e-9, maxP = 1e-9, maxS = 1e-9;
-            for (size_t i = iStart; i < iEnd; ++i) {
-                maxT = std::max(maxT, trans[i]);
-                maxM = std::max(maxM, mid[i]);
-                maxP = std::max(maxP, punch[i]);
-                maxS = std::max(maxS, sub[i]);
+            double w = 1.0;
+            if (energyWeighted) {
+                const double rel = std::min(std::min(1.0, beat.maxM / p80M),
+                        std::min(1.0, beat.maxP / p80P));
+                w = rel * rel;
+                if (w < 1e-4) {
+                    continue;
+                }
             }
-            if (maxT < 0.01 && maxS < 0.01) {
-                continue;
-            }
-            ++count;
-            const double binSec = localP / kBins;
+            weightSum += w;
+            const double binSec = beat.localP / kBins;
             for (int b = 0; b < kBins; ++b) {
-                const double t0 = b0 + b * binSec;
+                const double t0 = beat.start + b * binSec;
                 const double t1 = t0 + binSec;
                 const size_t s0 = static_cast<size_t>(t0 * rate);
                 const size_t s1 = std::min(n, std::max(s0 + 1, static_cast<size_t>(t1 * rate)));
@@ -184,17 +226,21 @@ double foldedKickShift(const std::vector<double>& wave,
                     mm += mid[i];
                     mt += trans[i];
                 }
-                const double inv = 1.0 / (s1 - s0);
-                folded[0][b] += (ms * inv) / maxS;
-                folded[1][b] += (mp * inv) / maxP;
-                folded[2][b] += (mm * inv) / maxM;
-                folded[3][b] += (mt * inv) / maxT;
+                const double inv = w / (s1 - s0);
+                folded[0][b] += (ms * inv) / beat.maxS;
+                folded[1][b] += (mp * inv) / beat.maxP;
+                folded[2][b] += (mm * inv) / beat.maxM;
+                folded[3][b] += (mt * inv) / beat.maxT;
             }
         }
+        const double norm = std::max(1e-9, weightSum);
         for (int c = 0; c < 4; ++c) {
             for (int b = 0; b < kBins; ++b) {
-                folded[c][b] /= std::max(1, count);
+                folded[c][b] /= norm;
             }
+        }
+        if (outWeightSum) {
+            *outWeightSum = weightSum;
         }
         return folded;
     };
@@ -231,9 +277,9 @@ double foldedKickShift(const std::vector<double>& wave,
     };
 
     const double middle = duration * 0.5;
-    const auto fullFolded = computeFolded(guard, duration - guard);
-    const auto firstFolded = computeFolded(guard, middle);
-    const auto secondFolded = computeFolded(middle, duration - guard);
+    const auto fullFolded = computeFolded(guard, duration - guard, -1, false);
+    const auto firstFolded = computeFolded(guard, middle, -1, false);
+    const auto secondFolded = computeFolded(middle, duration - guard, -1, false);
 
     int bestBin = 0, bestFirst = 0, bestSecond = 0;
     const auto kickScore = scoreFolded(fullFolded, &bestBin);
@@ -254,14 +300,113 @@ double foldedKickShift(const std::vector<double>& wave,
             binDist(bestSecond, bestBin) <= 2 &&
             maxRange(firstScore, bestBin, -2, 2) > 5.0 * maxRange(firstScore, 0, -2, 2) &&
             maxRange(secondScore, bestBin, -2, 2) > 5.0 * maxRange(secondScore, 0, -2, 2);
-    if (binDist(bestBin, 0) <= 2 || kickScore[bestBin] < 0.10 || ratio < 15.0 ||
-            fTrans[bestBin] < 0.70 || fTrans[bestBin] < fTrans[0] + 0.20 ||
-            fSub[bestBin] < 0.30 || !halvesAgree) {
+    if (binDist(bestBin, 0) > 2 && kickScore[bestBin] >= 0.10 && ratio >= 15.0 &&
+            fTrans[bestBin] >= 0.70 && fTrans[bestBin] >= fTrans[0] + 0.20 &&
+            fSub[bestBin] >= 0.30 && halvesAgree) {
+        double shift = bestBin * (period / kBins);
+        if (shift > period * 0.5) {
+            shift -= period;
+        }
+        return shift;
+    }
+
+    // Mode B: energy-weighted four-on-the-floor multi-band kick-impulse alignment.
+    // A real four-on-the-floor kick exhibits a causal downward frequency sweep
+    // (mid knock -> low-mid punch -> sub-bass body) on both even and odd beats
+    // and in both halves of the track. Energy weighting prevents quiet no-kick
+    // breakdowns or intros from diluting the active kick groove, while even/odd
+    // parity rejects alternating breakbeats and two-beat syncopated basslines.
+    const auto scoreImpulse = [&](const std::array<std::vector<double>, 4>& folded, int* outBest) {
+        const auto& fs = folded[0];
+        const auto& fp = folded[1];
+        const auto& fm = folded[2];
+        const auto& ft = folded[3];
+        std::vector<double> scores(kBins, 0);
+        int best = 0;
+        for (int b = 0; b < kBins; ++b) {
+            const double midRise = std::max(0.0, maxRange(fm, b, 0, 3) - meanRange(fm, b, -5, -1));
+            const double punchRise =
+                    std::max(0.0, maxRange(fp, b, 1, 6) - meanRange(fp, b, -5, -1));
+            const double subPeak = maxRange(fs, b, 2, 12);
+            const double subRise = std::max(0.0, subPeak - meanRange(fs, b, -5, -1));
+            const double transRise =
+                    std::max(0.0, maxRange(ft, b, -1, 2) - meanRange(ft, b, -5, -2));
+            const double score = midRise * punchRise *
+                    (0.4 + 0.6 * std::max(subPeak, subRise)) * (0.7 + 0.6 * transRise);
+            scores[b] = score;
+            if (score > scores[best]) {
+                best = b;
+            }
+        }
+        *outBest = best;
+        return scores;
+    };
+
+    double fullW = 0, firstW = 0, secondW = 0, evenW = 0, oddW = 0;
+    const auto wFull = computeFolded(guard, duration - guard, -1, true, &fullW);
+    const auto wFirst = computeFolded(guard, middle, -1, true, &firstW);
+    const auto wSecond = computeFolded(middle, duration - guard, -1, true, &secondW);
+    const auto wEven = computeFolded(guard, duration - guard, 0, true, &evenW);
+    const auto wOdd = computeFolded(guard, duration - guard, 1, true, &oddW);
+    if (fullW < 16.0 || firstW < 6.0 || secondW < 6.0 || evenW < 8.0 || oddW < 8.0) {
         return 0;
     }
-    double shift = bestBin * (period / kBins);
+
+    int impBest = 0, impFirst = 0, impSecond = 0, impEven = 0, impOdd = 0;
+    const auto impFullScore = scoreImpulse(wFull, &impBest);
+    const auto impFirstScore = scoreImpulse(wFirst, &impFirst);
+    const auto impSecondScore = scoreImpulse(wSecond, &impSecond);
+    const auto impEvenScore = scoreImpulse(wEven, &impEven);
+    const auto impOddScore = scoreImpulse(wOdd, &impOdd);
+
+    // Backtrack up to 3 bins along the mid-band rising edge to align with the
+    // leading attack rather than the knock peak.
+    int attackBin = impBest;
+    const double midPre = meanRange(wFull[2], impBest, -5, -2);
+    const double midPk = maxRange(wFull[2], impBest, 0, 3);
+    const double midThr = midPre + 0.30 * std::max(0.0, midPk - midPre);
+    for (int step = 0; step < 3; ++step) {
+        const int prev = (attackBin + kBins - 1) % kBins;
+        if (at(wFull[2], prev) >= midThr && at(wFull[2], prev) < at(wFull[2], attackBin)) {
+            attackBin = prev;
+        } else {
+            break;
+        }
+    }
+
+    const double impScore0 = maxRange(impFullScore, 0, -3, 3);
+    const double impRatio = impFullScore[impBest] / std::max(1e-6, impScore0);
+    const double impHalfRatio1 =
+            maxRange(impFirstScore, impBest, -3, 3) /
+            std::max(1e-6, maxRange(impFirstScore, 0, -3, 3));
+    const double impHalfRatio2 =
+            maxRange(impSecondScore, impBest, -3, 3) /
+            std::max(1e-6, maxRange(impSecondScore, 0, -3, 3));
+    const double evenVal = maxRange(impEvenScore, impBest, -3, 3);
+    const double oddVal = maxRange(impOddScore, impBest, -3, 3);
+    const double evenOddMinMax = std::min(evenVal, oddVal) /
+            std::max(1e-6, std::max(evenVal, oddVal));
+    if (binDist(attackBin, 0) <= 2 || impFullScore[impBest] < 0.06 || impRatio < 3.5 ||
+            binDist(impFirst, impBest) > 3 || binDist(impSecond, impBest) > 3 ||
+            impHalfRatio1 < 2.5 || impHalfRatio2 < 2.5 ||
+            binDist(impEven, impBest) > 3 || binDist(impOdd, impBest) > 3 ||
+            evenOddMinMax < 0.50) {
+        return 0;
+    }
+    double shift = attackBin * (period / kBins);
     if (shift > period * 0.5) {
         shift -= period;
+    }
+    // Never shift forward onto a delayed low-mid bass body (15-95 ms) when
+    // bin 0 already carries a stronger broadband transient click.
+    if (shift > 0 && shift < 0.095) {
+        const double trans0Rise = std::max(0.0,
+                maxRange(wFull[3], 0, -2, 2) - meanRange(wFull[3], 0, -6, -3));
+        const double transBestRise = std::max(0.0,
+                maxRange(wFull[3], impBest, -2, 2) - meanRange(wFull[3], impBest, -6, -3));
+        if (trans0Rise >= 0.25 && trans0Rise > transBestRise + 0.15) {
+            return 0;
+        }
     }
     return shift;
 }
@@ -837,8 +982,12 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
     // breakbeat offbeat kicks or single-half pattern shifts do not flip phase.
     // End of autonomously generated text.
     const bool denseBassKick =
+            candidates[1][0][1].precision >= 0.45 &&
+            candidates[1][1][1].precision >= 0.45 &&
             candidates[1][0][1].precision >= 0.70 * candidates[1][0][1].recall &&
-            candidates[1][1][1].precision >= 0.70 * candidates[1][1][1].recall;
+            candidates[1][1][1].precision >= 0.70 * candidates[1][1][1].recall &&
+            !(candidates[0][2][1].f1 >= 0.35 &&
+                    candidates[1][2][1].f1 < candidates[0][2][1].f1 - 0.08);
     const bool bassBothHalves =
             firstHalf[0][1].f1 > firstSame[0][1].f1 + 0.02 &&
             secondHalf[0][1].f1 > secondSame[0][1].f1 + 0.02 &&
@@ -913,32 +1062,67 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
     if (regional && windows >= 4) {
         // The two-state decoder bridges uncertain audio, but a regional edit
         // still needs 128 beats of active evidence. Silence cannot supply it.
+        const double regionalHalfShift =
+                std::abs((shifts[1] - period * 0.5) - shifts[0]) <= 0.030
+                ? shifts[1]
+                : shifts[0] + period * 0.5;
+        std::vector<double> windowLowRms(windows, 0);
+        if (!m_wave.empty() && m_hop > 0) {
+            const double waveRate = static_cast<double>(m_sampleRate.value()) / m_hop;
+            for (int i = 0; i < windows; ++i) {
+                const size_t s0 = static_cast<size_t>(i * 16.0 * waveRate);
+                const size_t s1 = std::min(m_wave.size(),
+                        static_cast<size_t>(std::min(duration, (i + 1) * 16.0) * waveRate));
+                if (s1 > s0) {
+                    double energy = 0;
+                    for (size_t s = s0; s < s1; ++s) {
+                        energy += m_wave[s] * m_wave[s];
+                    }
+                    windowLowRms[i] = std::sqrt(energy / (s1 - s0));
+                }
+            }
+        }
+        const double activeLowRms = quantile(windowLowRms, 0.8);
         std::vector<std::array<double, 2>> costs(windows);
         std::vector<std::array<int, 2>> parents(windows);
         std::vector<double> evidenceByWindow(windows);
         for (int i = 0; i < windows; ++i) {
-            const auto same = measure(beats, shifts[0], i * 16, std::min(duration, (i + 1) * 16.0));
-            const auto half = measure(beats, shifts[1], i * 16, std::min(duration, (i + 1) * 16.0));
-            const auto unchanged = measure(beats, 0, i * 16, std::min(duration, (i + 1) * 16.0));
+            const double winStart = i * 16.0;
+            const double winEnd = std::min(duration, (i + 1) * 16.0);
+            const auto same = measure(beats, shifts[0], winStart, winEnd);
+            const auto half = measure(beats, regionalHalfShift, winStart, winEnd);
+            const auto unchanged = measure(beats, 0, winStart, winEnd);
             const double low =
                     (half[0][0].f1 + half[0][1].f1 - same[0][0].f1 - same[0][1].f1) * 0.5;
             const double mid =
                     (half[2][0].f1 + half[2][1].f1 - same[2][0].f1 - same[2][1].f1) * 0.5;
             const double full = half[3][1].f1 - std::max(same[3][1].f1, unchanged[3][1].f1);
             // A stronger offbeat kick alone may win F1 while snares still
-            // support the old clock. Demand 2.5 times the full-band pulse support
-            // before abandoning that phase; otherwise the window is ambiguous.
+            // support the old clock. Demand 2.5 times the full-band pulse support,
+            // sub-bass corroboration, and active low-band energy before abandoning
+            // the global phase; confirming the global phase only requires clear
+            // majority support so active grooves with offbeat hats or syncopated
+            // sub-bass are not treated as silence.
             const double samePrecision = std::max(same[3][1].precision, unchanged[3][1].precision);
-            const bool halfDominates = half[3][1].precision > kPhaseDominance * samePrecision;
-            const bool sameDominates = samePrecision > kPhaseDominance * half[3][1].precision;
-            const double evidence =
-                    ((low > 0.03 && mid > 0.03 && full > 0.03 && halfDominates) ||
-                            (low < -0.03 && mid < -0.03 && full < -0.03 && sameDominates))
-                    ? (low + mid) * 0.5
-                    : 0;
+            const double halfRatioReq = globalState == 1 ? 1.35 : kPhaseDominance;
+            const double sameRatioReq = globalState == 0 ? 1.35 : kPhaseDominance;
+            const bool halfDominates = half[3][1].precision > halfRatioReq * samePrecision;
+            const bool sameDominates = samePrecision > sameRatioReq * half[3][1].precision;
+            const bool activeLowBand = activeLowRms <= 0 || windowLowRms[i] >= 0.66 * activeLowRms;
+            const bool halfEvidence = halfDominates && full > 0.03 &&
+                    ((low > 0.03 && mid > 0.03 && (globalState == 1 || activeLowBand)) ||
+                            (globalState == 1 && mid > 0.15 && full > 0.15));
+            const bool sameEvidence = sameDominates && full < -0.03 &&
+                    ((low < -0.03 && mid < -0.03 && (globalState == 0 || activeLowBand)) ||
+                            (globalState == 0 && mid < -0.15 && full < -0.15));
+            const double evidence = halfEvidence
+                    ? (low > 0.03 ? (low + mid) * 0.5 : (mid + full) * 0.5)
+                    : (sameEvidence
+                                    ? (low < -0.03 ? (low + mid) * 0.5 : (mid + full) * 0.5)
+                                    : 0);
             evidenceByWindow[i] = evidence;
             for (int state = 0; state < 2; ++state) {
-                const double stay = i ? costs[i - 1][state] : (state ? -0.08 : 0);
+                const double stay = i ? costs[i - 1][state] : (state != globalState ? -0.08 : 0);
                 const double change = i ? costs[i - 1][1 - state] - 0.08 : -1e9;
                 parents[i][state] = change > stay ? 1 - state : state;
                 costs[i][state] = std::max(stay, change) + (state ? evidence : 0);
@@ -954,18 +1138,21 @@ BeatGridEvidence::Result BeatGridEvidence::evaluate(const BeatsPointer& grid, bo
                 ++end;
             }
             const int state = states[start];
-            int supported = 0;
+            double supportedSeconds = 0;
             for (int i = start; i < end; ++i) {
-                supported += state ? evidenceByWindow[i] > 0.03 : evidenceByWindow[i] < -0.03;
+                if (state ? evidenceByWindow[i] > 0.03 : evidenceByWindow[i] < -0.03) {
+                    supportedSeconds += std::min(duration, (i + 1) * 16.0) - i * 16.0;
+                }
             }
-            if (state != globalState && supported * 16 < 128 * period) {
+            if (state != globalState && supportedSeconds < 128 * period) {
                 std::fill(states.begin() + start, states.begin() + end, globalState);
             }
             start = end;
         }
-        if (!halfSupported &&
-                std::all_of(states.begin(), states.end(), [](int state) { return state == 1; })) {
-            std::fill(states.begin(), states.end(), 0);
+        if (std::all_of(states.begin(), states.end(), [&](int state) {
+                return state != globalState;
+            })) {
+            std::fill(states.begin(), states.end(), globalState);
         }
         result.phaseChanges =
                 std::adjacent_find(states.begin(), states.end(), std::not_equal_to<>()) !=

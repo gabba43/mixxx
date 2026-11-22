@@ -441,4 +441,55 @@ TEST(BeatClockRecoveryTest, SteadyLowerBandPairRejectsFullBandArrangementExcursi
     EXPECT_TRUE(clock->constant);
     EXPECT_NEAR(clock->bpm, kBpm, 0.02);
 }
+
+TEST(BeatClockRecoveryTest, RecoversClockFromPercussionWhenSubBassIsSyncopated) {
+    Events events;
+    constexpr double bpm = 140;
+    for (int sixteenth = 0;; ++sixteenth) {
+        const double time = kOrigin + sixteenth * 15 / bpm;
+        if (time >= kDuration) {
+            break;
+        }
+        // Dense irregular sub-bass spreads band 0 across subdivisions so overall
+        // meanScore dips below 0.30, while mid and full-band percussion stay
+        // strongly periodic on the beat.
+        if (sixteenth % 3 == 0 || sixteenth % 5 == 0) {
+            events[0].push_back({time, 1.0});
+            events[1].push_back({time, 0.8});
+        }
+        if (sixteenth % 4 == 0) {
+            events[2].push_back({time, 1.0});
+            events[3].push_back({time, 1.0});
+        } else if (sixteenth % 2 == 0) {
+            events[2].push_back({time, 0.45});
+            events[3].push_back({time, 0.55});
+        } else {
+            events[2].push_back({time, 0.35});
+            events[3].push_back({time, 0.45});
+        }
+    }
+    const auto clock = mixxx::recoverBeatClock(events, bpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_NEAR(clock->harmonicRatio, 1, 1e-8);
+    EXPECT_NEAR(clock->bpm, bpm, 0.05);
+    EXPECT_TRUE(clock->constant);
+}
+
+TEST(BeatClockRecoveryTest, CoherentThreeBandDriftFallsBackFromIncoherentUpperPair) {
+    const auto drift = [](double time) {
+        return 0.050 * std::sin(2 * std::acos(-1.0) * time / kDuration);
+    };
+    auto events = makeEvents(drift);
+    // Corrupt band 2 (mid) in the middle section so consensus12 loses coherence
+    // while consensus01/consensus02 still agree coherently on the true drift.
+    auto noisyMid = makeEvents([](double time) {
+        return time >= 70 && time < 170 ? -0.045 * std::sin(4 * std::acos(-1.0) * time / kDuration)
+                                        : 0.050 * std::sin(2 * std::acos(-1.0) * time / kDuration);
+    });
+    events[2] = noisyMid[2];
+    const auto clock = mixxx::recoverBeatClock(events, kBpm, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_FALSE(clock->constant);
+    EXPECT_GT(clock->driftSeconds, 0.030);
+}
 // End of autonomously generated text.

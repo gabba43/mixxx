@@ -110,6 +110,7 @@ std::vector<Window> prepareWindows(
 
 struct PulseSupport {
     double score = 0;
+    double percussionScore = 0;
     double fullMatchedFraction = 0;
 };
 
@@ -180,6 +181,10 @@ class PulseHistogram {
             const auto histogram = measure(window.bands[band]);
             const double maximum = *std::max_element(histogram.begin(), histogram.end());
             result.score += kBandWeights[band] * maximum;
+            if (band > 0) {
+                result.percussionScore +=
+                        kBandWeights[band] * maximum / (kBandWeights[1] + kBandWeights[2]);
+            }
             if (band == kBands.size() - 1 && window.bands[band].totalWeight > 0) {
                 const double total = window.bands[band].totalWeight;
                 result.fullMatchedFraction =
@@ -214,13 +219,16 @@ class PulseHistogram {
 struct Family {
     double ratio;
     std::vector<double> scores;
+    std::vector<double> percussionScores;
     std::vector<double> tempos;
     std::vector<double> fullMatchedFraction;
     double meanScore = 0;
+    double meanPercussionScore = 0;
 };
 
 Family measureFamily(const std::vector<Window>& windows, double seed, double ratio) {
     Family family{ratio,
+            std::vector<double>(windows.size(), 0),
             std::vector<double>(windows.size(), 0),
             std::vector<double>(windows.size(), seed),
             std::vector<double>(windows.size(), 0)};
@@ -230,6 +238,7 @@ Family measureFamily(const std::vector<Window>& windows, double seed, double rat
             const auto support = histogram.score(windows[i]);
             if (support.score > family.scores[i]) {
                 family.scores[i] = support.score;
+                family.percussionScores[i] = support.percussionScore;
                 family.tempos[i] = bpm;
                 family.fullMatchedFraction[i] = support.fullMatchedFraction;
             }
@@ -624,6 +633,13 @@ std::optional<ConsensusClock> recoverConsensus(const std::vector<Window>& window
                     consensus01->span < 0.5 * consensus12->span) {
                 return consensus01;
             }
+            if (consensus12->correlation <= 0.6 && consensus01 && consensus02 &&
+                    consensus01->span > consensus01->threshold &&
+                    consensus02->span > consensus02->threshold &&
+                    consensus01->correlation > 0.70 && consensus02->correlation > 0.70) {
+                return consensus01->correlation >= consensus02->correlation ? consensus01
+                                                                          : consensus02;
+            }
         }
         if (consensus12) {
             return consensus12;
@@ -673,6 +689,11 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
                                    weights.begin(),
                                    0.0) /
                 totalWeight;
+        family.meanPercussionScore = std::inner_product(family.percussionScores.begin(),
+                                             family.percussionScores.end(),
+                                             weights.begin(),
+                                             0.0) /
+                totalWeight;
     }
     size_t selected = reference;
     double bestUtility = families[reference].meanScore;
@@ -707,7 +728,8 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
         }
     }
     const auto& family = families[selected];
-    if (family.meanScore < 0.30) {
+    if (family.meanScore < 0.30 &&
+            !(family.meanScore >= 0.25 && family.meanPercussionScore >= 0.31)) {
         return std::nullopt;
     }
     const double bpm = weightedQuantile(family.tempos, weights, 0.5);
