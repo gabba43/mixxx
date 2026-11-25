@@ -71,6 +71,7 @@ class BeatGridEvidence {
     std::vector<double> m_fullBandEnergy;
     std::array<std::vector<Event>, 4> m_events;
     std::array<std::vector<Event>, 4> m_attackEvents;
+    std::vector<Event> m_midBandEvents;
 };
 
 } // namespace mixxx

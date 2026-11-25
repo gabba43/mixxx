@@ -108,9 +108,54 @@ std::vector<Window> prepareWindows(
     return windows;
 }
 
+std::vector<PreparedBand> prepareSingleBandWindows(
+        const std::vector<BeatClockEvent>& input,
+        double duration) {
+    std::vector<BeatClockEvent> events;
+    for (const auto& event : input) {
+        if (std::isfinite(event.time) && std::isfinite(event.weight) &&
+                event.time >= 0 && event.time < duration && event.weight > 0) {
+            events.push_back(event);
+        }
+    }
+    std::sort(events.begin(),
+            events.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.time < rhs.time;
+            });
+    std::vector<PreparedBand> windows;
+    for (double start = 0; start < duration - kWindowSeconds; start += kHopSeconds) {
+        PreparedBand prepared;
+        std::vector<double> weights;
+        for (const auto& event : events) {
+            if (event.time >= start && event.time < start + kWindowSeconds) {
+                prepared.events.push_back(event);
+                weights.push_back(event.weight);
+            }
+        }
+        const double scale = std::max(1e-12, quantile(weights, 0.8));
+        for (auto& event : prepared.events) {
+            event.weight = std::min(1.0, event.weight / scale);
+            prepared.totalWeight += event.weight;
+        }
+        windows.push_back(std::move(prepared));
+    }
+    return windows;
+}
+
+double circularPhaseDistance(double a, double b) {
+    const double diff = std::abs(a - b);
+    return std::min(diff, 1.0 - diff);
+}
+
 struct PulseSupport {
     double score = 0;
     double percussionScore = 0;
+    double lowScore = 0;
+    double fullScore = 0;
+    double lowPeakPhase = 0;
+    double fullPeakPhase = 0;
+    double lowMatchedFraction = 0;
     double fullMatchedFraction = 0;
 };
 
@@ -179,16 +224,32 @@ class PulseHistogram {
         PulseSupport result;
         for (size_t band = 0; band < kBands.size(); ++band) {
             const auto histogram = measure(window.bands[band]);
-            const double maximum = *std::max_element(histogram.begin(), histogram.end());
+            const auto bestIt = std::max_element(histogram.begin(), histogram.end());
+            const double maximum = *bestIt;
+            const double peakPhase =
+                    (static_cast<double>(bestIt - histogram.begin()) + 0.5) / histogram.size();
             result.score += kBandWeights[band] * maximum;
+            if (band == 0) {
+                result.lowScore = maximum;
+                result.lowPeakPhase = peakPhase;
+                if (window.bands[band].totalWeight > 0) {
+                    const double total = window.bands[band].totalWeight;
+                    result.lowMatchedFraction =
+                            maximum * (kWindowSeconds / m_period + total) / (2 * total);
+                }
+            }
             if (band > 0) {
                 result.percussionScore +=
                         kBandWeights[band] * maximum / (kBandWeights[1] + kBandWeights[2]);
             }
-            if (band == kBands.size() - 1 && window.bands[band].totalWeight > 0) {
-                const double total = window.bands[band].totalWeight;
-                result.fullMatchedFraction =
-                        maximum * (kWindowSeconds / m_period + total) / (2 * total);
+            if (band == kBands.size() - 1) {
+                result.fullScore = maximum;
+                result.fullPeakPhase = peakPhase;
+                if (window.bands[band].totalWeight > 0) {
+                    const double total = window.bands[band].totalWeight;
+                    result.fullMatchedFraction =
+                            maximum * (kWindowSeconds / m_period + total) / (2 * total);
+                }
             }
         }
         return result;
@@ -220,17 +281,29 @@ struct Family {
     double ratio;
     std::vector<double> scores;
     std::vector<double> percussionScores;
+    std::vector<double> lowScores;
+    std::vector<double> fullScores;
+    std::vector<double> lowPeakPhases;
+    std::vector<double> fullPeakPhases;
     std::vector<double> tempos;
+    std::vector<double> lowMatchedFraction;
     std::vector<double> fullMatchedFraction;
     double meanScore = 0;
     double meanPercussionScore = 0;
+    double meanFullScore = 0;
+    double meanLowMatchedFraction = 0;
 };
 
 Family measureFamily(const std::vector<Window>& windows, double seed, double ratio) {
     Family family{ratio,
             std::vector<double>(windows.size(), 0),
             std::vector<double>(windows.size(), 0),
+            std::vector<double>(windows.size(), 0),
+            std::vector<double>(windows.size(), 0),
+            std::vector<double>(windows.size(), 0),
+            std::vector<double>(windows.size(), 0),
             std::vector<double>(windows.size(), seed),
+            std::vector<double>(windows.size(), 0),
             std::vector<double>(windows.size(), 0)};
     for (double bpm = seed * 0.99; bpm <= seed * 1.01 + 0.0001; bpm += 0.05) {
         const PulseHistogram histogram(bpm);
@@ -239,7 +312,12 @@ Family measureFamily(const std::vector<Window>& windows, double seed, double rat
             if (support.score > family.scores[i]) {
                 family.scores[i] = support.score;
                 family.percussionScores[i] = support.percussionScore;
+                family.lowScores[i] = support.lowScore;
+                family.fullScores[i] = support.fullScore;
+                family.lowPeakPhases[i] = support.lowPeakPhase;
+                family.fullPeakPhases[i] = support.fullPeakPhase;
                 family.tempos[i] = bpm;
+                family.lowMatchedFraction[i] = support.lowMatchedFraction;
                 family.fullMatchedFraction[i] = support.fullMatchedFraction;
             }
         }
@@ -657,7 +735,8 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
         const std::array<std::vector<BeatClockEvent>, 4>& events,
         double referenceBpm,
         double duration,
-        const std::array<std::vector<BeatClockEvent>, 4>* attacks) {
+        const std::array<std::vector<BeatClockEvent>, 4>* attacks,
+        const std::vector<BeatClockEvent>* midBandEvents) {
     if (!std::isfinite(referenceBpm) || referenceBpm < 15 || referenceBpm > 400 ||
             !std::isfinite(duration) || duration < 48) {
         return std::nullopt;
@@ -694,9 +773,20 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
                                              weights.begin(),
                                              0.0) /
                 totalWeight;
+        family.meanFullScore = std::inner_product(family.fullScores.begin(),
+                                       family.fullScores.end(),
+                                       weights.begin(),
+                                       0.0) /
+                totalWeight;
+        family.meanLowMatchedFraction = std::inner_product(family.lowMatchedFraction.begin(),
+                                                family.lowMatchedFraction.end(),
+                                                weights.begin(),
+                                                0.0) /
+                totalWeight;
     }
     size_t selected = reference;
     double bestUtility = families[reference].meanScore;
+    std::optional<std::vector<PreparedBand>> midBandWindows;
     for (size_t candidate = 0; candidate < families.size(); ++candidate) {
         const auto& family = families[candidate];
         if (candidate == reference) {
@@ -718,7 +808,7 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
             }
         }
         const bool subNormalDouble =
-                referenceBpm < 85 && family.ratio == 2 && dominance > 0.75 && corroboration > 0.75;
+                referenceBpm < 95 && family.ratio == 2 && dominance > 0.65 && corroboration > 0.75;
         const double cost =
                 subNormalDouble ? 0.055 : (0.055 + 0.04 * std::abs(std::log2(family.ratio)));
         const double utility = family.meanScore - cost;
@@ -727,9 +817,83 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
             selected = candidate;
         }
     }
+    // Autonomously generated by an AI agent.
+    // Alternating kick-snare breakbeats (e.g. Drum & Bass / Jungle at 150-190 BPM)
+    // tracked at half tempo place low-bass kicks and full-band/mid-band snares on
+    // opposite half-cycles of the reference period. Doubling unifies kicks and
+    // snares onto the same beat phase (raising full-band score and keeping kicks
+    // aligned), while requiring mid-band (180-500 Hz) snare-body anti-phase
+    // rejects high-frequency offbeat hi-hats and offbeat tonal stabs.
+    // End of autonomously generated text.
+    if (selected == reference && referenceBpm < 95 && midBandEvents && !midBandEvents->empty()) {
+        for (size_t candidate = 0; candidate < families.size(); ++candidate) {
+            const auto& family = families[candidate];
+            if (family.ratio != 2 || (referenceBpm >= 60 && referenceBpm * family.ratio > 215)) {
+                continue;
+            }
+            const auto& ref = families[reference];
+            double corroboration = 0;
+            double fullDominance = 0;
+            double antiFullWeight = 0;
+            double validFullWeight = 0;
+            for (size_t window = 0; window < windows.size(); ++window) {
+                const double w = weights[window] / totalWeight;
+                if (family.fullMatchedFraction[window] + 0.01 >=
+                        ref.fullMatchedFraction[window]) {
+                    corroboration += w;
+                }
+                if (family.fullScores[window] > ref.fullScores[window] + 0.02) {
+                    fullDominance += w;
+                }
+                if (ref.lowScores[window] >= 0.25 && ref.fullScores[window] >= 0.25) {
+                    validFullWeight += w;
+                    if (std::abs(circularPhaseDistance(
+                                         ref.lowPeakPhases[window], ref.fullPeakPhases[window]) -
+                                0.5) <= 0.12) {
+                        antiFullWeight += w;
+                    }
+                }
+            }
+            if (corroboration > 0.75 && fullDominance > 0.65 &&
+                    family.meanFullScore >= 0.40 &&
+                    family.meanFullScore > ref.meanFullScore + 0.04 &&
+                    family.meanLowMatchedFraction + 0.03 >= ref.meanLowMatchedFraction &&
+                    validFullWeight >= 0.40 &&
+                    antiFullWeight / validFullWeight >= 0.65) {
+                midBandWindows = prepareSingleBandWindows(*midBandEvents, duration);
+                double antiMidWeight = 0;
+                double validMidWeight = 0;
+                for (size_t window = 0;
+                        window < windows.size() && window < midBandWindows->size();
+                        ++window) {
+                    if (ref.lowScores[window] < 0.25) {
+                        continue;
+                    }
+                    const PulseHistogram refHist(ref.tempos[window]);
+                    const auto hist = refHist.measure((*midBandWindows)[window]);
+                    const auto bestIt = std::max_element(hist.begin(), hist.end());
+                    const double midMax = *bestIt;
+                    if (midMax >= 0.25) {
+                        const double midPhase =
+                                (static_cast<double>(bestIt - hist.begin()) + 0.5) / hist.size();
+                        const double w = weights[window] / totalWeight;
+                        validMidWeight += w;
+                        if (std::abs(circularPhaseDistance(ref.lowPeakPhases[window], midPhase) -
+                                    0.5) <= 0.12) {
+                            antiMidWeight += w;
+                        }
+                    }
+                }
+                if (validMidWeight >= 0.40 && antiMidWeight / validMidWeight >= 0.65) {
+                    selected = candidate;
+                }
+            }
+        }
+    }
     const auto& family = families[selected];
     if (family.meanScore < 0.30 &&
-            !(family.meanScore >= 0.25 && family.meanPercussionScore >= 0.31)) {
+            !(family.meanScore >= 0.25 && family.meanPercussionScore >= 0.31) &&
+            !(selected != reference && family.meanFullScore >= 0.40)) {
         return std::nullopt;
     }
     const double bpm = weightedQuantile(family.tempos, weights, 0.5);
@@ -748,6 +912,24 @@ std::optional<RecoveredBeatClock> recoverBeatClock(
                 (bodyConsensus && bodyConsensus->span <= bodyConsensus->threshold &&
                         bodyConsensus->span < 0.5 * consensus->span)) {
             consensus = bodyConsensus;
+        }
+    }
+    if (!consensus && midBandEvents && !midBandEvents->empty()) {
+        if (!midBandWindows) {
+            midBandWindows = prepareSingleBandWindows(*midBandEvents, duration);
+        }
+        if (midBandWindows->size() == windows.size()) {
+            std::vector<Window> percWindows = windows;
+            for (size_t i = 0; i < percWindows.size(); ++i) {
+                percWindows[i].bands[1] = (*midBandWindows)[i];
+            }
+            const auto midClock =
+                    recoverBand(percWindows, histogram, 1, period, duration, warpFactors);
+            const auto fullClock =
+                    recoverBand(percWindows, histogram, 2, period, duration, warpFactors);
+            if (midClock && fullClock) {
+                consensus = correlateClocks(percWindows, *midClock, *fullClock, period, duration);
+            }
         }
     }
     if (!consensus) {

@@ -492,4 +492,71 @@ TEST(BeatClockRecoveryTest, CoherentThreeBandDriftFallsBackFromIncoherentUpperPa
     EXPECT_FALSE(clock->constant);
     EXPECT_GT(clock->driftSeconds, 0.030);
 }
+
+TEST(BeatClockRecoveryTest, RecoversSubNormalDoubleTempoAcrossBreakdowns) {
+    constexpr double trueBpm = 174.0;
+    Events events;
+    for (int beat = 0;; ++beat) {
+        const double time = kOrigin + beat * 60 / trueBpm;
+        if (time >= kDuration) {
+            break;
+        }
+        // Keep ~70% of the track driving at 174 BPM while inserting a
+        // half-time bass breakdown in the middle so dominance sits near 0.70.
+        const bool breakdown = time >= 100 && time < 148;
+        if (!breakdown || beat % 2 == 0) {
+            events[0].push_back({time, 1.0});
+            events[1].push_back({time, 1.0});
+        }
+        events[2].push_back({time, breakdown && beat % 2 == 1 ? 0.35 : 1.0});
+        events[3].push_back({time, breakdown && beat % 2 == 1 ? 0.35 : 1.0});
+    }
+    const auto clock = mixxx::recoverBeatClock(events, trueBpm / 2, kDuration);
+    ASSERT_TRUE(clock);
+    EXPECT_NEAR(clock->harmonicRatio, 2, 1e-8);
+    EXPECT_NEAR(clock->bpm, trueBpm, 0.05);
+    EXPECT_TRUE(clock->constant);
+}
+
+TEST(BeatClockRecoveryTest, AlternatingKickSnareBreakbeatDoublesOnlyWithMidBandCorroboration) {
+    constexpr double trueBpm = 158.0;
+    Events events;
+    std::vector<mixxx::BeatClockEvent> snareMidBand;
+    std::vector<mixxx::BeatClockEvent> kickOnlyMidBand;
+    for (int eighth = 0;; ++eighth) {
+        const double time = kOrigin + eighth * 30 / trueBpm;
+        if (time >= kDuration) {
+            break;
+        }
+        const int step = eighth % 8;
+        // Classic two-step breakbeat: accented kick on beat 1 (step 0),
+        // syncopated secondary kick on 3.5 (step 5), snares on beats 2 and 4 (steps 2 and 6).
+        if (step == 0 || step == 5) {
+            const double kickWeight = step == 0 ? 1.0 : 0.75;
+            events[0].push_back({time, kickWeight});
+            events[1].push_back({time, kickWeight});
+            events[2].push_back({time, kickWeight});
+            events[3].push_back({time, kickWeight});
+            kickOnlyMidBand.push_back({time, kickWeight});
+        }
+        if (step == 2 || step == 6) {
+            events[3].push_back({time, 1.0});
+            snareMidBand.push_back({time, 1.0});
+        }
+    }
+    // With anti-phase mid-band snare body, half-tempo 79 BPM doubles to 158 BPM.
+    const auto doubled = mixxx::recoverBeatClock(
+            events, trueBpm / 2, kDuration, nullptr, &snareMidBand);
+    ASSERT_TRUE(doubled);
+    EXPECT_NEAR(doubled->harmonicRatio, 2, 1e-8);
+    EXPECT_NEAR(doubled->bpm, trueBpm, 0.05);
+
+    // Without anti-phase mid-band snare body (e.g. high-frequency offbeat hats),
+    // the reference tempo is retained.
+    const auto retained = mixxx::recoverBeatClock(
+            events, trueBpm / 2, kDuration, nullptr, &kickOnlyMidBand);
+    ASSERT_TRUE(retained);
+    EXPECT_NEAR(retained->harmonicRatio, 1, 1e-8);
+    EXPECT_NEAR(retained->bpm, trueBpm / 2, 0.05);
+}
 // End of autonomously generated text.

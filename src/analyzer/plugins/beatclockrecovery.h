@@ -23,12 +23,14 @@ struct RecoveredBeatClock {
 };
 
 /// Event bands are ordered from low bass through mid bass, broad bass, and full band.
+/// Optional midBandEvents carry band-passed mid-range percussion (e.g. 180-500 Hz snare body).
 /// A weak or short recording leaves the existing tracker responsible for the grid.
 std::optional<RecoveredBeatClock> recoverBeatClock(
         const std::array<std::vector<BeatClockEvent>, 4>& events,
         double referenceBpm,
         double duration,
-        const std::array<std::vector<BeatClockEvent>, 4>* attacks = nullptr);
+        const std::array<std::vector<BeatClockEvent>, 4>* attacks = nullptr,
+        const std::vector<BeatClockEvent>* midBandEvents = nullptr);
 
 } // namespace mixxx
 // End of autonomously generated text.

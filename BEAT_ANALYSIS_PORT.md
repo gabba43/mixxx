@@ -11,11 +11,11 @@ commit `0fffd3d0d07b755c34c1730f7b87afadd8f2be19`.
 | --- | --- | --- |
 | Tempo modes | `BeatGridMode`, `BeatDetectionSettings`, preferences and reanalysis menu | Auto, Constant and Variable modes, including per-track choices and migration of existing settings. |
 | Grid selection | `BeatFactory::makePreferredBeats()` | Separates sustained drift from abrupt tracker phase changes; Constant fits a full-track grid. |
-| Audio clock | `recoverBeatClock()`, `BeatGridEvidence::recoverGrid()` | Selects a supported tempo family across the track (with upper-tempo ceiling protection, sub-normal double-tempo recovery, and percussion-led fallback when syncopated sub-bass lowers overall band-weighted score), estimates local window tempo warp, preserves steady low-frequency clocks and steady lower-band pairs when upper-frequency percussion/synth arrangements jump, falls back to coherent lower-band drift pairs when the upper pair loses coherence, and reconstructs shared drift from independent frequency bands. Applies to all three modes. |
+| Audio clock | `recoverBeatClock()`, `BeatGridEvidence::recoverGrid()` | Selects a supported tempo family across the track (with upper-tempo ceiling protection, broadened sub-normal double-tempo recovery below 95 BPM across breakdowns, alternating kick-snare breakbeat double-tempo recovery corroborated by 180–500 Hz mid-band snare-body anti-phase evidence, mid/full-band clock consensus fallback, and percussion-led fallback when syncopated sub-bass lowers overall band-weighted score), estimates local window tempo warp, preserves steady low-frequency clocks and steady lower-band pairs when upper-frequency percussion/synth arrangements jump, falls back to coherent lower-band drift pairs when the upper pair loses coherence, and reconstructs shared drift from independent frequency bands. Applies to all three modes. |
 | Kick alignment | `evaluate()`, `findAttack()`, `refineAttackShift()`, `foldedKickShift()`, `recoverGrid()` | Confirms half-beat corrections across both track halves (including dense four-on-the-floor kick/percussion evidence under loud offbeat hats and 8th-note basslines while preventing low-precision offbeat sub-bass rumbles from flipping an aligned kick); aligns fine timing to kick attacks up to 55 ms before the low-bass crest, retains aligned full-band percussive attack phase when both track halves contradict a delayed bass-body or soft-crest shift (including in non-regional/Variable evaluation), recovers displaced kick phases when unshifted beats sit on preceding hi-hats, protects regional half-beat phase-change decoding against quiet no-kick outros, syncopated sub-bass, and off-half-beat shift wander (with symmetric `globalState` priors and exact window duration accounting), and aligns to the multi-band wave-folded kick attack — both for sidechain-rumble ducking/rebound (Mode A) and energy-weighted four-on-the-floor downward-sweep kick impulses with even/odd beat parity and delayed-bass-body transient guards (Mode B). |
 | Queen Mary refinement | `refineBeatTrackingTempo()` | Supplies the initial beat sequence and corrects supported metrical errors before audio-clock recovery. |
 | BPM display and editing | `getBpmInRange()`, `tryScale()`, `tryTranslateBeats()`, `trySetBpm()` | Steadier BPM readings; fractional factors, phase shifts and BPM edits preserve variable tempo. Locked grids remain protected. |
-| Analysis and caching | `AnalyzerBeats` | Preserves protected grids, handles partial final blocks, and versions analysis results (`audio_grid_evidence=8`). Fast analysis applies to Constant mode. |
+| Analysis and caching | `AnalyzerBeats` | Preserves protected grids, handles partial final blocks, and versions analysis results (`audio_grid_evidence=9`). Fast analysis applies to Constant mode. |
 | Waveform transport | `VisualPlayPosition::getPlaySlipAtNextVSync()` | Searches the complete position history at higher output latency. A bounded fallback keeps the waveform moving while the history fills. |
 | Linux installation | `install-linux.sh`, `tools/install-linux.py` | User-local build/install workflow, dedicated profile and starter, safe updates and RAM-aware parallelism. |
 
@@ -33,14 +33,19 @@ commit `0fffd3d0d07b755c34c1730f7b87afadd8f2be19`.
 | Wave-folded kick alignment & steady low-band clock consensus | Debian 12 container | 1,396 |
 | Full-band attack contradiction retention against delayed bass bodies | Debian 12 container | 1,397 |
 | Multi-band kick-impulse alignment, percussion clock fallback & regional outro gating | Debian 12 (beat-suite harness: 61/61 passed) | +5 unit tests |
+| Sub-normal and alternating kick-snare double-BPM recovery (`bpm-improvements_v1.2`) | Ubuntu 24.04 (standalone beat-suite harness: 60/60 passed; 44-track reference suite) | +5 unit tests |
 
-Application and test builds succeeded. The latest total combines 1,396 CTest
-cases and one file test run from a writable directory, plus five additional
-beat-clock and grid-evidence unit tests verified in the standalone beat-suite
-harness (`61 passed, 0 failed`). The 38 repository-disabled
-tests remain disabled; the optional external-material test adds one more disabled
-entry and was run separately. Use CTest's separate processes to avoid existing
-shared-state conflicts in a single full-suite process.
+Application and test builds succeeded. The latest standalone beat-suite run
+verifies 60/60 unit tests (`BeatClockRecoveryTest`: 26,
+`BreakbeatGridEvidenceTest`: 21, `BeatGridModeTest`: 12,
+`QuantizedBeatMapTest`: 1) alongside full Auto/Constant/Variable analysis across
+44 reference tracks (fixing half-BPM recognition on `Neurosekanice`
+87.0→174.0 BPM, `Atlantis` 78.7→157.4 BPM, and `Conquering Lion`
+85.0→170.2 BPM with zero regressions on the remaining 41 tracks). The 38
+repository-disabled tests remain disabled; the optional external-material test
+adds one more disabled entry and was run separately. Use CTest's separate
+processes to avoid existing shared-state conflicts in a single full-suite
+process.
 
 Coverage includes:
 
@@ -54,16 +59,20 @@ Coverage includes:
 - **Attack regressions:** aligned/early/late grids, weak spikes before loud bass
   bodies, preceding hi-hats with sustained bass, 44.1/48 kHz, two chunk sizes and
   complete Auto/Constant analysis. Timing tolerance: 3 ms per tested beat.
-- **51 clock & evidence regressions:** 24 audio-clock cases, 12 recovery/phase
-  pipeline cases, four clock-fit cases and 11 variable-grid editing/serialization
-  cases. Cover sparse offbeat kicks, four-on-the-floor half-beat recovery under
-  loud offbeat hats, offbeat sub-bass rumble rejection, quiet no-kick outro
-  regional phase stability, displaced kick bodies when unshifted beats land on
-  preceding hi-hats, full-band attack contradiction retention against delayed
-  bass bodies and soft bass crests across Constant and Variable evaluation,
-  kick-transient phase retention and multi-band wave-folded kick alignment
-  (sidechain ducking/rebound and energy-weighted four-on-the-floor kick-impulse
-  sweeps with breakdowns), percussion-led clock recovery under syncopated
+- **60 clock, evidence & mode regressions:** 26 audio-clock cases, 21
+  recovery/phase/evidence pipeline cases and 13 grid-mode/quantized-map cases
+  (plus 11 variable-grid editing/serialization cases in the full Mixxx suite).
+  Cover sparse offbeat kicks, four-on-the-floor half-beat recovery under loud
+  offbeat hats, offbeat sub-bass rumble rejection, quiet no-kick outro regional
+  phase stability, displaced kick bodies when unshifted beats land on preceding
+  hi-hats, full-band attack contradiction retention against delayed bass bodies
+  and soft bass crests across Constant and Variable evaluation, kick-transient
+  phase retention and multi-band wave-folded kick alignment (sidechain
+  ducking/rebound and energy-weighted four-on-the-floor kick-impulse sweeps with
+  breakdowns), sub-normal double-tempo recovery across breakdowns, alternating
+  kick-snare breakbeat double-tempo recovery with 180–500 Hz mid-band
+  corroboration while rejecting slow four-on-the-floor grooves with loud offbeat
+  hats and slow boom-bap grooves, percussion-led clock recovery under syncopated
   sub-bass, coherent lower-band drift fallback when upper pairs lose coherence,
   late-track tempo acceleration exceeding half a period per hop, steady-bass and
   lower-band pair rejection of uncorroborated upper-band excursions, harmonic

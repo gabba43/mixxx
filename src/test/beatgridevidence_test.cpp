@@ -697,4 +697,156 @@ TEST(BreakbeatGridEvidenceTest, FoldedKickImpulseAlignsQuarterBeatKickWithBreakd
                 0.025 * kSampleRate);
     }
 }
+
+TEST(BreakbeatGridEvidenceTest, AlternatingKickSnareBreakbeatDoublesFromHalfTempoReference) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double trueBpm = 158.0;
+    constexpr double period = 60.0 / trueBpm;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double barPos = std::fmod(time - kOrigin, 4 * period);
+                const auto addKick = [&](double onset, double amp) {
+                    const double dt = barPos - onset;
+                    if (dt >= 0 && dt < 0.14) {
+                        value += amp * std::exp(-28 * dt) *
+                                (0.75 * std::cos(2 * M_PI * 60 * dt) +
+                                        0.25 * std::cos(2 * M_PI * 145 * dt));
+                    }
+                };
+                const auto addSnare = [&](double onset, double amp) {
+                    const double dt = barPos - onset;
+                    if (dt >= 0 && dt < 0.09) {
+                        value += amp * std::exp(-42 * dt) *
+                                (0.50 * std::cos(2 * M_PI * 360 * dt) +
+                                        0.50 * std::cos(2 * M_PI * 1850 * dt) +
+                                        0.35 * std::cos(2 * M_PI * 2900 * dt));
+                    }
+                };
+                // Two-step Jungle/DnB pattern: kicks on 1 and 3.5, high-pitched snares on 2 and 4.
+                addKick(0, 0.95);
+                addKick(2.5 * period, 0.75);
+                addSnare(period, 0.95);
+                addSnare(3 * period, 0.95);
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto halfReference = mixxx::Beats::fromConstTempo(
+            kRate, mixxx::audio::FramePos(kOrigin * kSampleRate), mixxx::Bpm(trueBpm / 2));
+    const auto grid = evidence.recoverGrid(halfReference, mixxx::BeatGridMode::Auto);
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    EXPECT_NEAR(trueBpm,
+            grid->getBpmInRange(mixxx::audio::kStartFramePos,
+                        mixxx::audio::FramePos(kDuration * kSampleRate))
+                    .value(),
+            0.25);
+}
+
+TEST(BreakbeatGridEvidenceTest, SlowFourOnTheFloorWithLoudOffbeatHatsRetainsTempo) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double slowBpm = 80.0;
+    constexpr double period = 60.0 / slowBpm;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double elapsed = std::fmod(time - kOrigin, period);
+                if (elapsed < 0.14) {
+                    value += 0.85 * std::exp(-28 * elapsed) *
+                            (0.80 * std::cos(2 * M_PI * 58 * elapsed) +
+                                    0.20 * std::cos(2 * M_PI * 240 * elapsed));
+                }
+                const double hatElapsed = elapsed - period * 0.5;
+                if (hatElapsed >= 0 && hatElapsed < 0.05) {
+                    value += 1.40 * std::exp(-110 * hatElapsed) *
+                            (0.55 * std::cos(2 * M_PI * 2600 * hatElapsed) +
+                                    0.45 * std::cos(2 * M_PI * 3500 * hatElapsed));
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto reference = mixxx::Beats::fromConstTempo(
+            kRate, mixxx::audio::FramePos(kOrigin * kSampleRate), mixxx::Bpm(slowBpm));
+    const auto grid = evidence.recoverGrid(reference, mixxx::BeatGridMode::Auto);
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    EXPECT_NEAR(slowBpm,
+            grid->getBpmInRange(mixxx::audio::kStartFramePos,
+                        mixxx::audio::FramePos(kDuration * kSampleRate))
+                    .value(),
+            0.25);
+}
+
+TEST(BreakbeatGridEvidenceTest, SlowBoomBapWithSyncopatedKickRetainsTempo) {
+    mixxx::BeatGridEvidence evidence;
+    evidence.initialize(kRate);
+    constexpr double slowBpm = 85.0;
+    constexpr double period = 60.0 / slowBpm;
+    std::vector<CSAMPLE> stereo(8192);
+    for (int start = 0; start < kSampleRate * kDuration; start += 4096) {
+        const int frames = std::min(4096, kSampleRate * kDuration - start);
+        for (int frame = 0; frame < frames; ++frame) {
+            const double time = (start + frame) / static_cast<double>(kSampleRate);
+            double value = 0;
+            if (time >= kOrigin) {
+                const double barPos = std::fmod(time - kOrigin, 4 * period);
+                const auto addKick = [&](double onset, double amp) {
+                    const double dt = barPos - onset;
+                    if (dt >= 0 && dt < 0.14) {
+                        value += amp * std::exp(-26 * dt) *
+                                (0.80 * std::cos(2 * M_PI * 58 * dt) +
+                                        0.20 * std::cos(2 * M_PI * 150 * dt));
+                    }
+                };
+                const auto addSnare = [&](double onset, double amp) {
+                    const double dt = barPos - onset;
+                    if (dt >= 0 && dt < 0.10) {
+                        value += amp * std::exp(-38 * dt) *
+                                (0.50 * std::cos(2 * M_PI * 260 * dt) +
+                                        0.50 * std::cos(2 * M_PI * 2100 * dt));
+                    }
+                };
+                // 85 BPM boom-bap: kick on 1 and 3.5, snare on 2 and 4 (in phase at 85 BPM).
+                addKick(0, 0.95);
+                addKick(2.5 * period, 0.80);
+                addSnare(period, 0.90);
+                addSnare(3 * period, 0.90);
+                const double hatPos = std::fmod(barPos, period * 0.5);
+                if (hatPos < 0.03) {
+                    value += 0.28 * std::exp(-130 * hatPos) *
+                            std::cos(2 * M_PI * 3200 * hatPos);
+                }
+            }
+            stereo[2 * frame] = stereo[2 * frame + 1] = static_cast<CSAMPLE>(value);
+        }
+        ASSERT_TRUE(evidence.processSamples(stereo.data(), frames * 2));
+    }
+    evidence.prepare();
+    const auto reference = mixxx::Beats::fromConstTempo(
+            kRate, mixxx::audio::FramePos(kOrigin * kSampleRate), mixxx::Bpm(slowBpm));
+    const auto grid = evidence.recoverGrid(reference, mixxx::BeatGridMode::Auto);
+    ASSERT_TRUE(grid);
+    EXPECT_TRUE(grid->hasConstantTempo());
+    EXPECT_NEAR(slowBpm,
+            grid->getBpmInRange(mixxx::audio::kStartFramePos,
+                        mixxx::audio::FramePos(kDuration * kSampleRate))
+                    .value(),
+            0.25);
+}
 // End of autonomously generated text.

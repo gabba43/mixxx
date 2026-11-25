@@ -430,6 +430,7 @@ void BeatGridEvidence::initialize(audio::SampleRate sampleRate) {
     for (auto& events : m_attackEvents) {
         events.clear();
     }
+    m_midBandEvents.clear();
 }
 
 bool BeatGridEvidence::processSamples(const CSAMPLE* stereo, SINT count) {
@@ -480,17 +481,16 @@ void BeatGridEvidence::prepare() {
     // Full-band RMS retains snares and hats lost by averaging the waveform.
     // Their stable clock can veto a syncopated kick arrangement's phase change.
     constexpr std::array<double, 3> kCutoffs{85, 150, 300};
-    for (size_t channel = 0; channel < m_events.size(); ++channel) {
-        auto envelope = channel < kCutoffs.size() ? m_wave : m_fullBandEnergy;
-        if (channel < kCutoffs.size()) {
-            lowpass(&envelope, kCutoffs[channel], rate);
-            for (auto& value : envelope) {
-                value *= value;
+    const auto extractChannelEvents = [&](std::vector<double> envelope,
+                                              double channelFloor,
+                                              std::vector<Event>* outEvents,
+                                              std::vector<Event>* outAttacks) {
+        std::vector<double> band;
+        if (outAttacks) {
+            band = envelope;
+            for (auto& value : band) {
+                value = std::sqrt(std::max(0.0, value));
             }
-        }
-        auto band = envelope;
-        for (auto& value : band) {
-            value = std::sqrt(std::max(0.0, value));
         }
         lowpass(&envelope, 30, rate);
         for (auto& value : envelope) {
@@ -510,7 +510,7 @@ void BeatGridEvidence::prepare() {
             while (!maximum.empty() && maximum.front() + radius < i) {
                 maximum.pop_front();
             }
-            if (i >= 5 && envelope[i] >= floor && envelope[maximum.front()] > 1e-9) {
+            if (i >= 5 && envelope[i] >= channelFloor && envelope[maximum.front()] > 1e-9) {
                 activation[i] =
                         std::max(0.0, envelope[i] - envelope[i - 5]) / envelope[maximum.front()];
             }
@@ -546,18 +546,40 @@ void BeatGridEvidence::prepare() {
                     envelope.begin());
             const double time = ((peak - 2.5 + crest) * 0.5 + 0.5) / rate;
             const double weight = activation[peak] * activation[peak];
-            auto& events = m_events[channel];
-            if (events.empty() || time > events.back().time) {
-                events.push_back({time, weight});
+            if (outEvents->empty() || time > outEvents->back().time) {
+                outEvents->push_back({time, weight});
             }
-            if (const auto attack = findAttack(transient, band, time, rate, floor)) {
-                auto& attacks = m_attackEvents[channel];
-                if (attacks.empty() || *attack > attacks.back().time) {
-                    attacks.push_back({*attack, weight});
+            if (outAttacks) {
+                if (const auto attack = findAttack(transient, band, time, rate, floor)) {
+                    if (outAttacks->empty() || *attack > outAttacks->back().time) {
+                        outAttacks->push_back({*attack, weight});
+                    }
                 }
             }
         }
+    };
+    for (size_t channel = 0; channel < m_events.size(); ++channel) {
+        auto envelope = channel < kCutoffs.size() ? m_wave : m_fullBandEnergy;
+        if (channel < kCutoffs.size()) {
+            lowpass(&envelope, kCutoffs[channel], rate);
+            for (auto& value : envelope) {
+                value *= value;
+            }
+        }
+        extractChannelEvents(
+                std::move(envelope), floor, &m_events[channel], &m_attackEvents[channel]);
     }
+    // Extract 180-500 Hz mid-bandpass events (snare/knock body) from the ~1 kHz
+    // waveform so sub-bass kicks cannot mask snare backbeats and high-frequency
+    // hi-hats remain attenuated by block averaging.
+    auto midLow = m_wave;
+    lowpass(&midLow, 180.0, rate);
+    std::vector<double> midBandEnergy(m_wave.size());
+    for (size_t i = 0; i < m_wave.size(); ++i) {
+        const double diff = m_wave[i] - midLow[i];
+        midBandEnergy[i] = diff * diff;
+    }
+    extractChannelEvents(std::move(midBandEnergy), floor * 0.5, &m_midBandEvents, nullptr);
 }
 
 bool BeatGridEvidence::hasEvidence() const {
@@ -759,7 +781,8 @@ BeatsPointer BeatGridEvidence::recoverGrid(const BeatsPointer& reference, BeatGr
     }
     const double duration = static_cast<double>(m_frames) / m_sampleRate;
     const auto bpm = reference->getBpmInRange(audio::kStartFramePos, audio::FramePos(m_frames));
-    const auto clock = recoverBeatClock(m_events, bpm.value(), duration, &m_attackEvents);
+    const auto clock = recoverBeatClock(
+            m_events, bpm.value(), duration, &m_attackEvents, &m_midBandEvents);
     if (!clock) {
         return {};
     }
