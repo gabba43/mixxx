@@ -47,8 +47,12 @@ the QtQml, QtQml.Models and QtQuick runtime modules.
 
 The repository provides `tools/debian_buildenv.sh setup` for Debian/Ubuntu,
 `tools/rpm_buildenv.sh setup` for Fedora and `tools/archlinux_buildenv.sh setup`
-for Arch. Those dependency setup scripts may use administrator privileges.
-The installer itself never invokes `sudo` or a system package manager. Missing
+for Arch Linux (including `cmake`, `ninja`, `microsoft-gsl`, Qt 6 + Wayland,
+and audio/codec libraries). In interactive runs, `./install-linux.sh` checks
+for missing build tools (and missing Arch Linux packages via `pacman -T`) and
+prompts to install them with `sudo` before configuring CMake. Pass
+`--install-deps` to install missing dependencies non-interactively, or
+`--no-install-deps` to forbid `sudo` and system package managers. Missing
 dependencies stop CMake configuration before compilation.
 
 New build directories use Release and disable tests/benchmarks. Existing caches

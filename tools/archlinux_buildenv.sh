@@ -1,28 +1,83 @@
-#!//bin/bash
+#!/bin/bash
+# This script installs Mixxx's build dependencies on Arch Linux and derivatives.
 
-set -o pipefail
+set -euo pipefail
 
-sudo pacman -S --needed --noconfirm protobuf vamp-plugin-sdk \
-    chromaprint libid3tag rubberband soundtouch \
-    lame libogg libmad libvorbis libmp4v2 faad2 opusfile wavpack \
-    libshout libsndfile portmidi portaudio \
-    sqlite upower lilv libebur128 libmodplug \
-    qt6-declarative qtkeychain-qt6 qt6-svg qt6-shadertools \
-    qt6-5compat qt6-multimedia-ffmpeg qt6-scxml microsoft-gsl
+install_packages() {
+    local packages=(
+        cmake
+        ninja
+        pkgconf
+        gcc
+        make
+        git
+        chromaprint
+        faad2
+        ffmpeg
+        fftw
+        flac
+        glib2
+        glu
+        hidapi
+        lame
+        libebur128
+        libglvnd
+        libid3tag
+        libkeyfinder
+        libmad
+        libmodplug
+        libogg
+        libsndfile
+        libusb
+        libvorbis
+        libx11
+        libxkbcommon
+        lilv
+        lv2
+        microsoft-gsl
+        openssl
+        opus
+        opusfile
+        pipewire
+        portaudio
+        portmidi
+        protobuf
+        qt6-5compat
+        qt6-base
+        qt6-declarative
+        qt6-multimedia-ffmpeg
+        qt6-scxml
+        qt6-shadertools
+        qt6-svg
+        qt6-tools
+        qt6-wayland
+        qtkeychain-qt6
+        rubberband
+        soundtouch
+        sqlite
+        upower
+        vamp-plugin-sdk
+        wavpack
+        zlib
+    )
 
-# Checking if taglib is installed and build it from the AUR if this
-# is not the case
-if pacman -Qi taglib1 >/dev/null 2>&1; then
-    taglib1_installed=true
-else
-    taglib1_installed=false
-fi
+    if ! pacman -T taglib1 >/dev/null 2>&1 && ! pacman -T taglib >/dev/null 2>&1; then
+        packages+=(taglib)
+    fi
 
-if [ "$taglib1_installed" == false ]; then
-    echo 'Building taglib1 from the AUR'
-    rm -rf /tmp/taglib1 > /dev/null 2>&1
-    git clone https://aur.archlinux.org/taglib1.git /tmp/taglib1 \
-        && cd /tmp/taglib1 \
-        && sed -i 's/arch=(x86_64)/arch=(x86_64 aarch64)/' PKGBUILD \
-        && makepkg -si --noconfirm
-fi
+    sudo pacman -S --needed --noconfirm "${packages[@]}"
+}
+
+case "${1:-setup}" in
+    name)
+        echo "No build environment name required for Arch Linux." >&2
+        echo "This script installs the build dependencies via pacman using the \"setup\" option." >&2
+        ;;
+    setup)
+        install_packages
+        ;;
+    *)
+        echo "Usage: $0 [setup|name]" >&2
+        exit 1
+        ;;
+esac

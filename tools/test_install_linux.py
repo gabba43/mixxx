@@ -583,6 +583,121 @@ class InstallerTests(unittest.TestCase):
                 installer.build_command(self.root, 1024, 1)[0], "cmake"
             )
 
+    def test_detects_arch_and_missing_packages_including_taglib_fallback(self):
+        with patch.object(
+            installer,
+            "os_release_info",
+            return_value={"ID": "arch", "PRETTY_NAME": "Arch Linux"},
+        ):
+            self.assertEqual(installer.detect_distro_family(), "arch")
+        with patch.object(
+            installer,
+            "os_release_info",
+            return_value={"ID": "cachyos", "ID_LIKE": "arch"},
+        ):
+            self.assertEqual(installer.detect_distro_family(), "arch")
+
+        def fake_pacman(cmd, **kwargs):
+            if cmd == ["pacman", "-T", *installer.ARCH_PACKAGES]:
+                return SimpleNamespace(
+                    returncode=127, stdout="cmake\nninja\nmicrosoft-gsl\n"
+                )
+            if cmd == ["pacman", "-T", "taglib1"]:
+                return SimpleNamespace(returncode=0, stdout="")
+            return SimpleNamespace(returncode=127, stdout="taglib\n")
+
+        with patch.object(
+            installer.shutil, "which", return_value="/usr/bin/pacman"
+        ), patch.object(installer.subprocess, "run", side_effect=fake_pacman):
+            self.assertEqual(
+                installer.missing_arch_packages(),
+                ["cmake", "ninja", "microsoft-gsl"],
+            )
+
+        def fake_pacman_no_taglib(cmd, **kwargs):
+            if cmd == ["pacman", "-T", *installer.ARCH_PACKAGES]:
+                return SimpleNamespace(returncode=127, stdout="microsoft-gsl\n")
+            return SimpleNamespace(returncode=127, stdout="taglib\n")
+
+        with patch.object(
+            installer.shutil, "which", return_value="/usr/bin/pacman"
+        ), patch.object(
+            installer.subprocess, "run", side_effect=fake_pacman_no_taglib
+        ):
+            self.assertEqual(
+                installer.missing_arch_packages(), ["microsoft-gsl", "taglib"]
+            )
+
+    def test_arch_dependency_installation_respects_prompt_and_flags(self):
+        with patch.object(
+            installer, "detect_distro_family", return_value="arch"
+        ), patch.object(
+            installer.shutil, "which", return_value="/usr/bin/pacman"
+        ), patch.object(
+            installer,
+            "missing_arch_packages",
+            return_value=["cmake", "ninja", "microsoft-gsl"],
+        ):
+            # Interactive confirmation installs missing Arch packages via pacman.
+            with patch.object(
+                installer.sys.stdin, "isatty", return_value=True
+            ), patch("builtins.input", return_value=""), patch.object(
+                installer, "run"
+            ) as run_cmd, contextlib.redirect_stdout(io.StringIO()):
+                installed = installer.ensure_dependencies(
+                    self.root, None, "build", False
+                )
+            self.assertTrue(installed)
+            run_cmd.assert_called_once_with(
+                ["sudo", "pacman", "-S", "--needed", "cmake", "ninja", "microsoft-gsl"]
+            )
+
+            # --no-install-deps never runs sudo even interactively.
+            with patch.object(
+                installer.sys.stdin, "isatty", return_value=True
+            ), patch.object(installer, "run") as run_cmd, contextlib.redirect_stdout(
+                io.StringIO()
+            ):
+                installed = installer.ensure_dependencies(
+                    self.root, False, "build", False
+                )
+            self.assertFalse(installed)
+            run_cmd.assert_not_called()
+
+            # --install-deps installs non-interactively without prompting.
+            with patch.object(
+                installer.sys.stdin, "isatty", return_value=False
+            ), patch.object(installer, "run") as run_cmd, contextlib.redirect_stdout(
+                io.StringIO()
+            ):
+                installed = installer.ensure_dependencies(
+                    self.root, True, "build", False
+                )
+            self.assertTrue(installed)
+            run_cmd.assert_called_once_with(
+                ["sudo", "pacman", "-S", "--needed", "cmake", "ninja", "microsoft-gsl"]
+            )
+
+    def test_incomplete_cmake_cache_refreshes_after_installing_deps(self):
+        build = self.root / "build"
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={self.root}\n"
+        )
+        with patch.object(
+            installer.shutil, "which", return_value="/usr/bin/ninja"
+        ), patch.object(installer, "run") as command:
+            installer.configure_build(
+                self.root,
+                build,
+                self.root / "prefix",
+                [],
+                refresh_incomplete=True,
+            )
+        self.assertIn("-G", command.call_args.args[0])
+        self.assertIn("Ninja", command.call_args.args[0])
+        self.assertIn("-DCMAKE_BUILD_TYPE=Release", command.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

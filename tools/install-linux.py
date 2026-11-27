@@ -188,35 +188,230 @@ def prepare_sources(source, managed_directory, repository, ref, update=None):
         )
 
 
-def dependency_help():
-    distribution = "unknown distribution"
+ARCH_PACKAGES = (
+    "cmake",
+    "ninja",
+    "pkgconf",
+    "gcc",
+    "make",
+    "git",
+    "chromaprint",
+    "faad2",
+    "ffmpeg",
+    "fftw",
+    "flac",
+    "glib2",
+    "glu",
+    "hidapi",
+    "lame",
+    "libebur128",
+    "libglvnd",
+    "libid3tag",
+    "libkeyfinder",
+    "libmad",
+    "libmodplug",
+    "libogg",
+    "libsndfile",
+    "libusb",
+    "libvorbis",
+    "libx11",
+    "libxkbcommon",
+    "lilv",
+    "lv2",
+    "microsoft-gsl",
+    "openssl",
+    "opus",
+    "opusfile",
+    "pipewire",
+    "portaudio",
+    "portmidi",
+    "protobuf",
+    "qt6-5compat",
+    "qt6-base",
+    "qt6-declarative",
+    "qt6-multimedia-ffmpeg",
+    "qt6-scxml",
+    "qt6-shadertools",
+    "qt6-svg",
+    "qt6-tools",
+    "qt6-wayland",
+    "qtkeychain-qt6",
+    "rubberband",
+    "soundtouch",
+    "sqlite",
+    "upower",
+    "vamp-plugin-sdk",
+    "wavpack",
+    "zlib",
+)
+
+
+def os_release_info():
+    info = {}
     release = Path("/etc/os-release")
     if release.is_file():
-        for line in release.read_text().splitlines():
-            if line.startswith("PRETTY_NAME="):
-                distribution = line.split("=", 1)[1].strip('"')
+        for line in release.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=" in line and not line.startswith("#"):
+                key, _, value = line.partition("=")
+                info[key.strip()] = value.strip().strip('"').strip("'")
+    return info
+
+
+def detect_distro_family():
+    info = os_release_info()
+    ids = {info.get("ID", "").lower()} | set(
+        info.get("ID_LIKE", "").lower().split()
+    )
+    if "arch" in ids:
+        return "arch"
+    if ids & {"debian", "ubuntu"}:
+        return "debian"
+    if ids & {"fedora", "rhel", "centos"}:
+        return "fedora"
+    if shutil.which("pacman"):
+        return "arch"
+    if shutil.which("apt-get"):
+        return "debian"
+    if shutil.which("dnf"):
+        return "fedora"
+    return "unknown"
+
+
+def missing_arch_packages():
+    if not shutil.which("pacman"):
+        return []
+    try:
+        result = subprocess.run(
+            ["pacman", "-T", *ARCH_PACKAGES],
+            capture_output=True,
+            text=True,
+        )
+        missing = [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+        taglib_ok = any(
+            subprocess.run(
+                ["pacman", "-T", pkg],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+            for pkg in ("taglib1", "taglib")
+        )
+    except OSError:
+        return []
+    if not taglib_ok:
+        missing.append("taglib")
+    return missing
+
+
+def confirm_install(prompt):
+    while True:
+        answer = input(prompt).strip().lower() or "j"
+        if answer in {"j", "ja", "y", "yes"}:
+            return True
+        if answer in {"n", "nein", "no"}:
+            return False
+
+
+def ensure_dependencies(source, install_deps, mode, skip_build):
+    """Check and optionally install missing native build tools and libraries.
+
+    Returns True if system packages were installed.
+    """
+    if skip_build:
+        return False
+    family = detect_distro_family()
+    interactive = sys.stdin.isatty()
+    allow_install = (
+        True
+        if install_deps is True
+        else (False if install_deps is False else interactive)
+    )
+    if family == "arch" and shutil.which("pacman"):
+        missing = missing_arch_packages()
+        if not missing:
+            return False
+        print(
+            "Fehlende Arch-Linux-Abhängigkeiten: " + ", ".join(missing),
+            flush=True,
+        )
+        if not allow_install:
+            return False
+        if install_deps is True or confirm_install(
+            "Fehlende Systempakete jetzt via pacman (sudo) installieren? [J/n]: "
+        ):
+            run(["sudo", "pacman", "-S", "--needed", *missing])
+            return True
+        return False
+
+    required_tools = ("cmake", "pkg-config")
+    missing_tools = [t for t in required_tools if not shutil.which(t)]
+    if install_deps is not True and not missing_tools:
+        return False
+    setup_script = None
+    if family == "debian":
+        candidate = source / "tools/debian_buildenv.sh"
+        if candidate.is_file():
+            setup_script = ["bash", str(candidate), "setup"]
+    elif family == "fedora":
+        candidate = source / "tools/rpm_buildenv.sh"
+        if candidate.is_file():
+            setup_script = ["bash", str(candidate), "setup"]
+    if not setup_script or not allow_install:
+        return False
+    if missing_tools:
+        print(
+            "Fehlende Build-Werkzeuge: " + ", ".join(missing_tools),
+            flush=True,
+        )
+    if install_deps is True or confirm_install(
+        f"Build-Abhängigkeiten jetzt über {' '.join(setup_script)} installieren? [J/n]: "
+    ):
+        run(setup_script)
+        return True
+    return False
+
+
+def dependency_help():
+    info = os_release_info()
+    distribution = info.get("PRETTY_NAME", "unknown distribution")
     print(
         f"Detected: {distribution}\n"
         "Requires C++20, CMake >= 3.22, pkg-config, Make or Ninja,\n"
         "Python 3.8+ for this installer, and Mixxx's native libraries:\n"
-        "Qt 6 with private headers, audio/codecs, USB/MIDI, etc.\n"
-        "Debian/Ubuntu: see packaging/debian/control.in for native packages.\n"
-        "Fedora: dnf builddep mixxx; Arch: the Mixxx PKGBUILD makedepends;\n"
+        "Qt 6 with private headers, audio/codecs, USB/MIDI, microsoft-gsl, etc.\n"
+        "Run with --install-deps (or confirm the interactive prompt) to install\n"
+        "missing system dependencies automatically.\n"
+        "Arch Linux: sudo pacman -S --needed "
+        + " ".join(ARCH_PACKAGES)
+        + " taglib\n"
+        "  (or: ./tools/archlinux_buildenv.sh setup)\n"
+        "Debian/Ubuntu: ./tools/debian_buildenv.sh setup\n"
+        "Fedora: ./tools/rpm_buildenv.sh setup\n"
         "openSUSE: zypper source-install --build-deps-only mixxx.\n"
-        "Distro packages can target an older Qt/version: also check\n"
-        "LINUX_INSTALL.md and CMake errors for missing dependencies.\n"
-        "This installer executes no system package manager or sudo command.\n"
+        "Use --no-install-deps to forbid sudo/package-manager commands.\n"
         "Guide: https://github.com/mixxxdj/mixxx/wiki/Compiling-On-Linux\n"
         "Analysis uses the native Queen Mary and SoundTouch backends.\n"
         "No inference runtime, model download, pip or virtualenv is needed."
     )
 
 
-def configure_build(source, build, prefix, extra):
+def configure_build(source, build, prefix, extra, refresh_incomplete=False):
     validate_cache_source(build, source)
     build.mkdir(parents=True, exist_ok=True)
+    cache = build / "CMakeCache.txt"
+    if (
+        refresh_incomplete
+        and cache.exists()
+        and not (build / "build.ninja").exists()
+        and not (build / "Makefile").exists()
+    ):
+        cache.unlink()
     command = ["cmake", "-S", source, "-B", build]
-    if not (build / "CMakeCache.txt").exists():
+    if not cache.exists():
         command += [
             "-DCMAKE_BUILD_TYPE=Release",
             "-DBUILD_TESTING=OFF",
@@ -376,6 +571,16 @@ def install_launchers(prefix, profile, bin_dir, data_home):
         "# End of autonomously generated text.\n",
         0o644,
     )
+    if shutil.which("update-desktop-database"):
+        try:
+            subprocess.run(
+                ["update-desktop-database", str(data_home / "applications")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
     return link
 
 
@@ -506,7 +711,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog="Close this Mixxx profile before installing/updating. "
-        "No sudo or system package installation.",
+        "Prompts before installing missing system dependencies interactively; "
+        "use --install-deps or --no-install-deps to control explicitly.",
     )
     parser.add_argument(
         "--mode",
@@ -566,6 +772,20 @@ def main(argv=None):
         help="Build existing sources without fetching updates",
     )
     parser.set_defaults(update=None)
+    deps_group = parser.add_mutually_exclusive_group()
+    deps_group.add_argument(
+        "--install-deps",
+        dest="install_deps",
+        action="store_true",
+        help="Install missing system build dependencies via the distro package manager (uses sudo)",
+    )
+    deps_group.add_argument(
+        "--no-install-deps",
+        dest="install_deps",
+        action="store_false",
+        help="Do not install system dependencies or invoke sudo",
+    )
+    parser.set_defaults(install_deps=None)
     parser.add_argument(
         "--ref",
         default=REF,
@@ -599,6 +819,12 @@ def main(argv=None):
         if args.skip_build
         else compile_budget(args.ram_percent, args.jobs)
     )
+    installed_deps = ensure_dependencies(
+        Path(__file__).resolve().parents[1],
+        args.install_deps,
+        mode,
+        args.skip_build,
+    )
     build_tools = (
         ("cmake", "pkg-config")
         if not args.skip_build
@@ -606,7 +832,9 @@ def main(argv=None):
     )
     for tool in build_tools:
         if not shutil.which(tool):
-            raise ValueError(f"Missing build tool: {tool}; see --print-deps")
+            raise ValueError(
+                f"Missing build tool: {tool}; rerun with --install-deps or see --print-deps"
+            )
     source = source_directory(
         args.source_dir,
         data_home / "mixxx-bpm-improvements/source",
@@ -627,7 +855,16 @@ def main(argv=None):
     if mode == "install":
         check_launchers(args.prefix, args.bin_dir, data_home)
     if not args.skip_build:
-        configure_build(source, args.build_dir, args.prefix, args.cmake_arg)
+        if installed_deps:
+            configure_build(
+                source,
+                args.build_dir,
+                args.prefix,
+                args.cmake_arg,
+                refresh_incomplete=True,
+            )
+        else:
+            configure_build(source, args.build_dir, args.prefix, args.cmake_arg)
         run(build_command(args.build_dir, budget, jobs))
     if mode == "install":
         run(["cmake", "--install", args.build_dir, "--prefix", args.prefix])
